@@ -1,0 +1,36 @@
+# Go build artifacts
+local/
+bin/
+*.exe
+*.exe~
+*.test
+*.out
+
+
+# Machine-local build settings (build tags), included by the Makefile if present
+Makefile.local
+
+# Go workspace
+go.work
+go.work.sum
+#keel sym link
+keel
+
+# IDE / editor
+.vscode/
+.idea/
+.claude/
+
+# CLAUDE CODE
+CLAUDE.md
+
+# OS junk
+.DS_Store
+
+# Build artifacts / release dist
+dist/
+
+# Local SQLite databases
+*.db
+*.db-wal
+*.db-shm
