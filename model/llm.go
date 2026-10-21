@@ -10,6 +10,7 @@ import (
 
 	"github.com/jrniemiec/llm"
 
+	"github.com/jrniemiec/keel/internal/klog"
 	"github.com/jrniemiec/keel/runner"
 )
 
@@ -67,10 +68,14 @@ func (m *LLM) Ask(ctx context.Context, model string, msgs []runner.Message, tool
 		return runner.Message{}, err
 	}
 	if reply.Stop == llm.StopMaxTokens && strings.HasPrefix(model, "anthropic:") {
+		klog.Warn(klog.MsgMaxTokensRetry, "model", model, "out", reply.Usage.OutputTokens)
+		first := reply.Usage
 		reply, err = m.chat(ctx, providerKey{name: model, larger: true}, turns, defs)
 		if err != nil {
 			return runner.Message{}, fmt.Errorf("retry with a larger output limit: %w", err)
 		}
+		reply.Usage.InputTokens += first.InputTokens
+		reply.Usage.OutputTokens += first.OutputTokens
 	}
 	return fromReply(reply), nil
 }
@@ -160,11 +165,13 @@ func toToolDefs(tools []runner.ToolDef) []llm.ToolDef {
 // fromReply converts the model's reply into the runner's assistant message.
 func fromReply(r llm.ToolReply) runner.Message {
 	msg := runner.Message{
-		Role:    "assistant",
-		Text:    r.Turn.Text,
-		Stop:    stop(r.Stop),
-		Raw:     r.Turn.Raw,
-		RawFrom: r.Turn.RawFrom,
+		Role:      "assistant",
+		Text:      r.Turn.Text,
+		Stop:      stop(r.Stop),
+		Raw:       r.Turn.Raw,
+		RawFrom:   r.Turn.RawFrom,
+		TokensIn:  r.Usage.InputTokens,
+		TokensOut: r.Usage.OutputTokens,
 	}
 	for _, c := range r.Turn.Calls {
 		msg.ToolCalls = append(msg.ToolCalls, runner.ToolCall{ID: c.ID, Name: c.Name, Args: c.Input})

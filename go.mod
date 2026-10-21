@@ -1,6 +1,6 @@
 module github.com/jrniemiec/keel
 
-go 1.25.5
+go 1.26.0
 
 require (
 	github.com/jrniemiec/llm v0.2.0
@@ -20,6 +20,7 @@ require (
 	github.com/tidwall/sjson v1.2.5 // indirect
 	golang.org/x/exp v0.0.0-20250408133849-7e4ce0ab07d0 // indirect
 	golang.org/x/sys v0.33.0 // indirect
+	gopkg.in/natefinch/lumberjack.v2 v2.2.1 // indirect
 	modernc.org/libc v1.65.7 // indirect
 	modernc.org/mathutil v1.7.1 // indirect
 	modernc.org/memory v1.11.0 // indirect

@@ -4,13 +4,17 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"strconv"
 
+	"github.com/jrniemiec/keel/internal/klog"
 	"github.com/jrniemiec/keel/runner"
 	"github.com/jrniemiec/keel/store"
 )
+
+var version = "dev" // set by the Makefile
 
 type stubModel struct{}
 
@@ -28,10 +32,20 @@ func (stubTools) Call(ctx context.Context, call runner.ToolCall) (string, error)
 }
 
 func main() {
-	dbPath := flag.String("db", defaultDBPath(), "SQLite database file")
+	dbPath := flag.String("db", defaultPath("data", "keel.db"), "SQLite database file")
 	mem := flag.Bool("mem", false, "use the in-memory store instead of SQLite")
+	logFile := flag.String("log-file", defaultPath("keel.log"), "progress log, appended (tail -f it)")
+	logLevel := flag.String("log-level", "info", "debug, info, warn or error")
+	verbose := flag.Bool("verbose", false, "also print the log, at debug level, to stderr")
 	flag.Usage = usage
 	flag.Parse()
+
+	level, ok := klog.ParseLevel(*logLevel)
+	if !ok {
+		log.Fatalf("-log-level %q: want debug, info, warn or error", *logLevel)
+	}
+	klog.Init(*logFile, level, *verbose)
+	klog.Info(klog.MsgStarted, "version", version, "db", *dbPath, "mem", *mem)
 
 	var st runner.Store = store.NewMemory()
 	if !*mem {
@@ -75,11 +89,11 @@ Flags:
 	flag.PrintDefaults()
 }
 
-// defaultDBPath returns ~/.keel/data/keel.db.
-func defaultDBPath() string {
+// defaultPath returns ~/.keel/<elem…>, e.g. ~/.keel/data/keel.db.
+func defaultPath(elem ...string) string {
 	home, err := os.UserHomeDir()
 	if err != nil {
-		return "keel.db" // fall back to the current directory
+		return elem[len(elem)-1] // fall back to the current directory
 	}
-	return filepath.Join(home, ".keel", "data", "keel.db")
+	return filepath.Join(append([]string{home, ".keel"}, elem...)...)
 }

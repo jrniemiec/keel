@@ -25,6 +25,7 @@ import (
 
 	"github.com/jrniemiec/llm"
 
+	"github.com/jrniemiec/keel/internal/klog"
 	"github.com/jrniemiec/keel/model"
 	"github.com/jrniemiec/keel/runner"
 	"github.com/jrniemiec/keel/store"
@@ -49,6 +50,12 @@ func main() {
 		printLog(db, cfg.taskID)
 		return
 	}
+	level, ok := klog.ParseLevel(cfg.logLevel)
+	if !ok {
+		log.Fatalf("-log-level %q: want debug, info, warn or error", cfg.logLevel)
+	}
+	klog.Init(cfg.logFile, level, cfg.verbose)
+	klog.Info(klog.MsgStarted, "cmd", "demo", "db", cfg.dbPath, "task", cfg.taskID, "model", cfg.model)
 	seedNotes(cfg.dir)
 	res := runTask(db, cfg)
 	fmt.Printf("answer: %s (%d model calls)\n", res.Text, res.Steps)
@@ -64,6 +71,9 @@ type config struct {
 	showLog  bool
 	model    string // "scripted" or "provider:model"
 	thinking bool
+	logFile  string
+	logLevel string
+	verbose  bool
 }
 
 func parseFlags() config {
@@ -76,6 +86,9 @@ func parseFlags() config {
 	flag.BoolVar(&cfg.showLog, "log", false, "print the task's saved steps and exit")
 	flag.StringVar(&cfg.model, "model", "scripted", `"scripted", or a real model as provider:model, e.g. anthropic:claude-sonnet-5`)
 	flag.BoolVar(&cfg.thinking, "thinking", false, "turn on thinking (Anthropic: adaptive; Ollama: think)")
+	flag.StringVar(&cfg.logFile, "log-file", filepath.Join(home, ".keel", "keel.log"), "progress log, appended (tail -f it)")
+	flag.StringVar(&cfg.logLevel, "log-level", "info", "debug, info, warn or error; debug adds prompts and tool payloads")
+	flag.BoolVar(&cfg.verbose, "verbose", false, "also print the log, at debug level, to stderr")
 	flag.Usage = usage
 	flag.Parse()
 	return cfg
@@ -106,6 +119,7 @@ A fresh scripted run makes 8 calls: 1 model, 2 read_file, 3 model,
 4 count_words, 5 count_lines, 6 model, 7 append_file, 8 model (the final
 answer). A real model may make a different number; check with -log.
 Use a new -task name to start over, and the same -model when resuming.
+Progress goes to -log-file; follow it with: tail -f ~/.keel/keel.log
 
 Real models need ANTHROPIC_API_KEY or OPENAI_API_KEY (not Ollama).
 

@@ -6,6 +6,9 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"time"
+
+	"github.com/jrniemiec/keel/internal/klog"
 )
 
 // ToolDef describes a tool to the model. Tools.List returns them (from the MCP
@@ -33,9 +36,10 @@ type Tools interface {
 
 // Runner runs tasks: it drives the loop between the model and the tools.
 type Runner struct {
-	Model Model
-	Tools Tools
-	Store Store
+	Model  Model
+	Tools  Tools
+	Store  Store
+	Logger *klog.Logger // progress log; nil = klog.Default()
 }
 
 // Task represents a task to be executed by the Runner.
@@ -62,9 +66,11 @@ type Message struct {
 	IsError    bool   // Role "tool": the call failed or was not run; Text says why
 
 	// Set on Role "assistant" messages by the Model.
-	Stop    string          // why the model stopped: StopEnd, StopToolUse, …; "" = decide by ToolCalls
-	Raw     json.RawMessage // the provider's original reply, sent back as is (keeps thinking blocks)
-	RawFrom string          // the provider that produced Raw, e.g. "anthropic"
+	Stop      string          // why the model stopped: StopEnd, StopToolUse, …; "" = decide by ToolCalls
+	Raw       json.RawMessage // the provider's original reply, sent back as is (keeps thinking blocks)
+	RawFrom   string          // the provider that produced Raw, e.g. "anthropic"
+	TokensIn  int             // input tokens the reply cost, retries included
+	TokensOut int             // output tokens, thinking included
 }
 
 // Stop reasons in Message.Stop.
@@ -123,14 +129,24 @@ type Store interface {
 // restarted Run resumes from the log instead of starting over.
 // It stops when the model is done or task.MaxSteps is reached.
 func (r *Runner) Run(ctx context.Context, task Task) (Result, error) {
-	t, err := r.start(ctx, task)
+	began := time.Now()
+	log := r.Logger
+	if log == nil {
+		log = klog.Default()
+	}
+	log = log.With("task", task.ID)
+
+	t, err := r.start(ctx, task, log)
 	if err != nil {
+		log.Error(klog.MsgTaskFailed, "err", err)
 		return Result{}, fmt.Errorf("task %s: %w", task.ID, err)
 	}
 	text, err := t.run(ctx)
 	if err != nil {
+		log.Error(klog.MsgTaskFailed, "model_calls", t.steps, "dur", since(began), "err", err)
 		return Result{Steps: t.steps}, fmt.Errorf("task %s: %w", task.ID, err)
 	}
+	log.Info(klog.MsgTaskDone, "model_calls", t.steps, "dur", since(began))
 	return Result{Text: text, Steps: t.steps}, nil
 }
 
@@ -143,10 +159,12 @@ type taskRun struct {
 	done  map[string]bool // IDs of tool calls with a saved result
 	steps int             // model replies so far
 	last  *Message        // the last saved reply when Run started; nil for a new task
+	seq   int             // steps in the task's log so far; the next one is seq+1
+	log   *klog.Logger    // with task=<id>
 }
 
 // start checks the runner and the task, and rebuilds the task's state from the store.
-func (r *Runner) start(ctx context.Context, task Task) (*taskRun, error) {
+func (r *Runner) start(ctx context.Context, task Task, log *klog.Logger) (*taskRun, error) {
 	if r.Model == nil || r.Tools == nil || r.Store == nil {
 		return nil, errors.New("runner needs Model, Tools and Store")
 	}
@@ -170,8 +188,13 @@ func (r *Runner) start(ctx context.Context, task Task) (*taskRun, error) {
 	if err != nil {
 		return nil, fmt.Errorf("load: %w", err)
 	}
-	t := &taskRun{r: r, task: task, tools: tools}
+	t := &taskRun{r: r, task: task, tools: tools, log: log}
 	t.replay(history)
+	if len(history) == 0 {
+		log.Info(klog.MsgTaskStart, "model", task.Model, "max_steps", task.MaxSteps, "tools", len(tools))
+	} else {
+		log.Info(klog.MsgTaskResume, "model", task.Model, "steps", t.seq, "model_calls", t.steps)
+	}
 	return t, nil
 }
 
@@ -225,13 +248,18 @@ func ends(reply Message) (bool, error) {
 
 // ask gets the next reply from the model, saves it and adds it to the conversation.
 func (t *taskRun) ask(ctx context.Context) (Message, error) {
+	began := time.Now()
 	reply, err := t.r.Model.Ask(ctx, t.task.Model, t.msgs, t.tools)
 	if err != nil {
 		return Message{}, fmt.Errorf("step %d: ask model: %w", t.steps, err)
 	}
-	if err := t.r.Store.Append(ctx, t.task.ID, Step{Kind: ModelReply, Msg: reply}); err != nil {
+	if err := t.save(ctx, Step{Kind: ModelReply, Msg: reply}); err != nil {
 		return Message{}, fmt.Errorf("save reply: %w", err)
 	}
+	t.log.Info(klog.MsgModelReply, "seq", t.seq, "kind", ModelReply, "model", t.task.Model,
+		"stop", reply.Stop, "calls", len(reply.ToolCalls),
+		"in", reply.TokensIn, "out", reply.TokensOut, "dur", since(began))
+	t.log.Debug(klog.MsgModelText, "seq", t.seq, "text", reply.Text)
 	t.msgs = append(t.msgs, reply)
 	t.steps++
 	return reply, nil
@@ -242,8 +270,10 @@ func (t *taskRun) ask(ctx context.Context) (Message, error) {
 func (t *taskRun) act(ctx context.Context, reply Message) error {
 	for _, call := range reply.ToolCalls {
 		if t.done[call.ID] {
+			t.log.Debug(klog.MsgToolSkipped, "tool", call.Name, "call_id", call.ID)
 			continue // ran before the restart
 		}
+		began := time.Now()
 		out, failed, err := t.callTool(ctx, call)
 		if err != nil {
 			return err
@@ -251,8 +281,15 @@ func (t *taskRun) act(ctx context.Context, reply Message) error {
 		res := Message{Role: "tool", Text: out, ToolCallID: call.ID, IsError: failed}
 		// The call has run, so save its result even if ctx was cancelled meanwhile;
 		// otherwise resume would run it again.
-		if err := t.r.Store.Append(context.WithoutCancel(ctx), t.task.ID, Step{Kind: ToolResult, CallID: call.ID, Msg: res}); err != nil {
+		if err := t.save(context.WithoutCancel(ctx), Step{Kind: ToolResult, CallID: call.ID, Msg: res}); err != nil {
 			return fmt.Errorf("save result: %w", err)
+		}
+		attrs := []any{"seq", t.seq, "kind", ToolResult, "tool", call.Name, "call_id", call.ID, "dur", since(began)}
+		if failed {
+			t.log.Warn(klog.MsgToolResult, append(attrs, "failed", true, "err", out)...)
+		} else {
+			t.log.Info(klog.MsgToolResult, attrs...)
+			t.log.Debug(klog.MsgToolOut, "seq", t.seq, "text", out)
 		}
 		t.msgs = append(t.msgs, res)
 		t.done[call.ID] = true
@@ -267,13 +304,16 @@ func (t *taskRun) act(ctx context.Context, reply Message) error {
 // saved, and resume handles the call again.
 func (t *taskRun) callTool(ctx context.Context, call ToolCall) (out string, failed bool, err error) {
 	if !slices.ContainsFunc(t.tools, func(d ToolDef) bool { return d.Name == call.Name }) {
+		t.log.Warn(klog.MsgToolDenied, "tool", call.Name, "call_id", call.ID)
 		return fmt.Sprintf("tool %s is not available", call.Name), true, nil
 	}
 	// Intent before the side effect. On resume, an intent without a
 	// result is run again; safe only for idempotent tools (approval later).
-	if err := t.r.Store.Append(ctx, t.task.ID, Step{Kind: Intent, CallID: call.ID}); err != nil {
+	if err := t.save(ctx, Step{Kind: Intent, CallID: call.ID}); err != nil {
 		return "", false, fmt.Errorf("save intent: %w", err)
 	}
+	t.log.Info(klog.MsgToolCall, "seq", t.seq, "kind", Intent, "tool", call.Name, "call_id", call.ID)
+	t.log.Debug(klog.MsgToolArgs, "seq", t.seq, "args", string(call.Args))
 	out, err = t.r.Tools.Call(ctx, call)
 	if err != nil {
 		if ctx.Err() != nil {
@@ -288,6 +328,7 @@ func (t *taskRun) callTool(ctx context.Context, call ToolCall) (out string, fail
 func (t *taskRun) replay(history []Step) {
 	t.msgs = []Message{{Role: "user", Text: t.task.Goal}}
 	t.done = map[string]bool{}
+	t.seq = len(history)
 	for _, s := range history {
 		switch s.Kind {
 		case ModelReply:
@@ -300,6 +341,20 @@ func (t *taskRun) replay(history []Step) {
 			t.done[s.CallID] = true
 		}
 	}
+}
+
+// save appends s to the task's log and counts it in seq.
+func (t *taskRun) save(ctx context.Context, s Step) error {
+	if err := t.r.Store.Append(ctx, t.task.ID, s); err != nil {
+		return err
+	}
+	t.seq++
+	return nil
+}
+
+// since returns the time from began, rounded for the log.
+func since(began time.Time) time.Duration {
+	return time.Since(began).Round(time.Millisecond)
 }
 
 // filterTools returns the tools from all whose names are in allowed.
