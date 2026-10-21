@@ -16,7 +16,6 @@ type scriptModel struct {
 }
 
 func (m *scriptModel) Ask(ctx context.Context, model string, msgs []runner.Message, tools []runner.ToolDef) (runner.Message, error) {
-	maybeCrash("model")
 	switch countReplies(msgs) {
 	case 0:
 		return toolCalls(call("c1", "read_file", map[string]string{"path": "notes.txt"})), nil

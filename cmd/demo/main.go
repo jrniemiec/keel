@@ -1,13 +1,16 @@
-// Command demo runs a scripted task through the runner with the SQLite store,
-// to show durable execution: crash it with -crash-at, run it again, and it
-// resumes without repeating finished tool calls.
+// Command demo runs a task through the runner with the SQLite store, to show
+// durable execution: crash it with -crash-at, run it again, and it resumes
+// without repeating finished tool calls. The model is scripted by default, or
+// a real one with -model.
 //
 //	go run ./cmd/demo -task t1 -crash-at 7   # dies before append_file runs
 //	go run ./cmd/demo -task t1               # resumes and finishes
 //	go run ./cmd/demo -task t1 -log          # prints the saved steps
+//	go run ./cmd/demo -task t2 -model ollama:qwen3.5:9b
 //
-// A fresh run makes 8 calls: 1 model, 2 read_file, 3 model, 4 count_words,
-// 5 count_lines, 6 model, 7 append_file, 8 model (the final answer).
+// A fresh scripted run makes 8 calls: 1 model, 2 read_file, 3 model,
+// 4 count_words, 5 count_lines, 6 model, 7 append_file, 8 model (the final
+// answer). A real model may make a different number.
 package main
 
 import (
@@ -20,9 +23,16 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/jrniemiec/llm"
+
+	"github.com/jrniemiec/keel/model"
 	"github.com/jrniemiec/keel/runner"
 	"github.com/jrniemiec/keel/store"
 )
+
+// systemPrompt is sent to real models.
+const systemPrompt = `You are running a task with tools. Use the tools for every step and
+do not compute results yourself. When the task is done, reply with a short summary.`
 
 const sampleNotes = `keel is a durable agent runtime.
 Every step goes into an append-only log.
@@ -48,10 +58,12 @@ func main() {
 // config holds the command-line settings. -crash-at is the crashAt global,
 // since maybeCrash reads it.
 type config struct {
-	dbPath  string
-	dir     string
-	taskID  string
-	showLog bool
+	dbPath   string
+	dir      string
+	taskID   string
+	showLog  bool
+	model    string // "scripted" or "provider:model"
+	thinking bool
 }
 
 func parseFlags() config {
@@ -62,8 +74,44 @@ func parseFlags() config {
 	flag.StringVar(&cfg.dir, "dir", filepath.Join(home, ".keel", "demo"), "folder for notes.txt and the reports")
 	flag.StringVar(&cfg.taskID, "task", "demo", "task ID; a new ID starts a new task")
 	flag.BoolVar(&cfg.showLog, "log", false, "print the task's saved steps and exit")
+	flag.StringVar(&cfg.model, "model", "scripted", `"scripted", or a real model as provider:model, e.g. anthropic:claude-sonnet-5`)
+	flag.BoolVar(&cfg.thinking, "thinking", false, "turn on thinking (Anthropic: adaptive; Ollama: think)")
+	flag.Usage = usage
 	flag.Parse()
 	return cfg
+}
+
+// usage prints the help shown by -h.
+func usage() {
+	out := flag.CommandLine.Output()
+	fmt.Fprintf(out, `demo runs a task through the keel runner with the SQLite store.
+The task reads notes.txt, counts its words and lines, and appends them to
+report-<task>.txt. Crash it with -crash-at, run it again, and it resumes
+without repeating finished tool calls. The model is scripted unless -model
+names a real one.
+
+Usage:
+  go run ./cmd/demo [flags]
+
+Examples:
+  go run ./cmd/demo                         run task "demo" to completion
+  go run ./cmd/demo -task t1 -crash-at 7    exit before append_file runs
+  go run ./cmd/demo -task t1                resume t1 and finish it
+  go run ./cmd/demo -task t1 -log           print t1's saved steps
+  go run ./cmd/demo -task t2 -model ollama:qwen3.5:9b
+  go run ./cmd/demo -task t3 -model anthropic:claude-sonnet-5 -thinking
+  go run ./cmd/demo -task t4 -model openai:gpt-5
+
+A fresh scripted run makes 8 calls: 1 model, 2 read_file, 3 model,
+4 count_words, 5 count_lines, 6 model, 7 append_file, 8 model (the final
+answer). A real model may make a different number; check with -log.
+Use a new -task name to start over, and the same -model when resuming.
+
+Real models need ANTHROPIC_API_KEY or OPENAI_API_KEY (not Ollama).
+
+Flags:
+`)
+	flag.PrintDefaults()
 }
 
 // openStore creates the database folder and opens the SQLite store.
@@ -83,14 +131,18 @@ func seedNotes(dir string) {
 	}
 }
 
-// runTask runs the demo task with the scripted model and the file tools.
+// runTask runs the demo task with the chosen model and the file tools.
 func runTask(st runner.Store, cfg config) runner.Result {
 	report := reportName(cfg.taskID)
-	r := runner.Runner{Model: &scriptModel{report: report}, Tools: &fileTools{dir: cfg.dir}, Store: st}
+	var m runner.Model = &scriptModel{report: report}
+	if cfg.model != "scripted" {
+		m = model.NewLLM(llmConfigs(cfg.thinking), systemPrompt)
+	}
+	r := runner.Runner{Model: crashModel{m}, Tools: &fileTools{dir: cfg.dir}, Store: st}
 	task := runner.Task{
 		ID:           cfg.taskID,
 		Goal:         "Count the words and lines in notes.txt and append them to " + report + ".",
-		Model:        "scripted",
+		Model:        cfg.model,
 		MaxSteps:     10,
 		AllowedTools: []string{"read_file", "count_words", "count_lines", "append_file"},
 	}
@@ -99,10 +151,29 @@ func runTask(st runner.Store, cfg config) runner.Result {
 	return res
 }
 
-// printReport prints the task's report file.
+// llmConfigs returns the provider settings for real models. API keys come
+// from the environment.
+func llmConfigs(thinking bool) map[string]llm.ProviderConfig {
+	anthropic := llm.ProviderConfig{APIKey: os.Getenv("ANTHROPIC_API_KEY")}
+	if thinking {
+		anthropic.Thinking = llm.ThinkingAdaptive
+	}
+	return map[string]llm.ProviderConfig{
+		"anthropic": anthropic,
+		"openai":    {APIKey: os.Getenv("OPENAI_API_KEY")},
+		"ollama":    {Think: thinking},
+	}
+}
+
+// printReport prints the task's report file. A real model may not have
+// written it.
 func printReport(dir, taskID string) {
 	report := reportName(taskID)
 	out, err := os.ReadFile(filepath.Join(dir, report))
+	if errors.Is(err, fs.ErrNotExist) {
+		fmt.Printf("%s: not written\n", report)
+		return
+	}
 	check(err)
 	fmt.Printf("%s:\n%s", report, out)
 }

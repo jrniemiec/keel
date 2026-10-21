@@ -1,9 +1,12 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"os"
+
+	"github.com/jrniemiec/keel/runner"
 )
 
 var (
@@ -18,4 +21,14 @@ func maybeCrash(what string) {
 		fmt.Printf("crash before call %d (%s)\n", calls, what)
 		os.Exit(1)
 	}
+}
+
+// crashModel wraps a model so that -crash-at also counts model calls.
+type crashModel struct {
+	runner.Model
+}
+
+func (m crashModel) Ask(ctx context.Context, model string, msgs []runner.Message, tools []runner.ToolDef) (runner.Message, error) {
+	maybeCrash("model")
+	return m.Model.Ask(ctx, model, msgs, tools)
 }

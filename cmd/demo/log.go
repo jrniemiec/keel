@@ -18,6 +18,9 @@ func printLog(st runner.Store, taskID string) {
 	}
 	for i, s := range steps {
 		detail := s.Msg.Text
+		if s.Msg.IsError {
+			detail = "error: " + detail
+		}
 		for _, c := range s.Msg.ToolCalls {
 			detail += c.Name + "(" + c.ID + ") "
 		}

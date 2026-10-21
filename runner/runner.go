@@ -59,7 +59,27 @@ type Message struct {
 	Text       string
 	ToolCalls  []ToolCall
 	ToolCallID string // set on Role "tool" messages
+	IsError    bool   // Role "tool": the call failed or was not run; Text says why
+
+	// Set on Role "assistant" messages by the Model.
+	Stop    string          // why the model stopped: StopEnd, StopToolUse, …; "" = decide by ToolCalls
+	Raw     json.RawMessage // the provider's original reply, sent back as is (keeps thinking blocks)
+	RawFrom string          // the provider that produced Raw, e.g. "anthropic"
 }
+
+// Stop reasons in Message.Stop.
+const (
+	StopEnd       = "end"        // final answer
+	StopToolUse   = "tool_use"   // run ToolCalls
+	StopMaxTokens = "max_tokens" // cut off at the output limit; ToolCalls may be incomplete
+	StopRefusal   = "refusal"    // the model declined
+)
+
+// Errors that end a task because of the model's reply.
+var (
+	ErrCutOff  = errors.New("reply cut off at the output limit")
+	ErrRefused = errors.New("model refused")
+)
 
 // Result is the outcome of a finished task.
 type Result struct {
@@ -94,6 +114,7 @@ type Store interface {
 //  1. Ask: send the conversation so far plus the allowed tools to the model.
 //  2. Record: add the model's reply to the conversation.
 //  3. Check if done: if the reply has no tool calls, it's the final answer, so stop.
+//     A reply cut off at the output limit or a refusal ends the task with an error.
 //  4. Act: run each tool call the model asked for.
 //  5. Observe: add each tool's result, or its error, to the conversation.
 //  6. Repeat: loop back to 1, with the model now seeing those results.
@@ -158,8 +179,11 @@ func (r *Runner) start(ctx context.Context, task Task) (*taskRun, error) {
 func (t *taskRun) run(ctx context.Context) (string, error) {
 	// Resume: finish the last saved reply first.
 	if t.last != nil {
-		if len(t.last.ToolCalls) == 0 {
-			return t.last.Text, nil // finished before the restart
+		if done, err := ends(*t.last); done { // finished before the restart
+			if err != nil {
+				return "", err
+			}
+			return t.last.Text, nil
 		}
 		if err := t.act(ctx, *t.last); err != nil {
 			return "", err
@@ -171,7 +195,10 @@ func (t *taskRun) run(ctx context.Context) (string, error) {
 		if err != nil {
 			return "", err
 		}
-		if len(reply.ToolCalls) == 0 { // 3. Check if done
+		if done, err := ends(reply); done { // 3. Check if done
+			if err != nil {
+				return "", err
+			}
 			return reply.Text, nil
 		}
 		if err := t.act(ctx, reply); err != nil { // 4. Act, 5. Observe
@@ -179,6 +206,21 @@ func (t *taskRun) run(ctx context.Context) (string, error) {
 		}
 	}
 	return "", fmt.Errorf("step limit %d reached", t.task.MaxSteps)
+}
+
+// ends reports whether reply ends the task, and the error if it ends it
+// without an answer. A reply without Stop (e.g. from a scripted model) ends
+// the task when it has no tool calls.
+func ends(reply Message) (bool, error) {
+	switch reply.Stop {
+	case StopMaxTokens:
+		// The Model already retried with a larger limit (local/max-tokens.md).
+		// ToolCalls may be incomplete, so never run them.
+		return true, ErrCutOff
+	case StopRefusal:
+		return true, fmt.Errorf("%w: %s", ErrRefused, reply.Text)
+	}
+	return len(reply.ToolCalls) == 0, nil
 }
 
 // ask gets the next reply from the model, saves it and adds it to the conversation.
@@ -202,11 +244,11 @@ func (t *taskRun) act(ctx context.Context, reply Message) error {
 		if t.done[call.ID] {
 			continue // ran before the restart
 		}
-		out, err := t.callTool(ctx, call)
+		out, failed, err := t.callTool(ctx, call)
 		if err != nil {
 			return err
 		}
-		res := Message{Role: "tool", Text: out, ToolCallID: call.ID}
+		res := Message{Role: "tool", Text: out, ToolCallID: call.ID, IsError: failed}
 		// The call has run, so save its result even if ctx was cancelled meanwhile;
 		// otherwise resume would run it again.
 		if err := t.r.Store.Append(context.WithoutCancel(ctx), t.task.ID, Step{Kind: ToolResult, CallID: call.ID, Msg: res}); err != nil {
@@ -219,27 +261,27 @@ func (t *taskRun) act(ctx context.Context, reply Message) error {
 }
 
 // callTool runs call and returns the text for its tool result. A call to a tool
-// the task doesn't allow is not run, and a failed call becomes an error text;
-// the model sees both and can adjust. It returns an error only when the intent
-// can't be saved or ctx is done. Then no result is saved, and resume handles
-// the call again.
-func (t *taskRun) callTool(ctx context.Context, call ToolCall) (string, error) {
+// the task doesn't allow is not run, and a failed call becomes an error text,
+// both with failed set; the model sees them and can adjust. It returns an
+// error only when the intent can't be saved or ctx is done. Then no result is
+// saved, and resume handles the call again.
+func (t *taskRun) callTool(ctx context.Context, call ToolCall) (out string, failed bool, err error) {
 	if !slices.ContainsFunc(t.tools, func(d ToolDef) bool { return d.Name == call.Name }) {
-		return fmt.Sprintf("error: tool %s is not available", call.Name), nil
+		return fmt.Sprintf("tool %s is not available", call.Name), true, nil
 	}
 	// Intent before the side effect. On resume, an intent without a
 	// result is run again; safe only for idempotent tools (approval later).
 	if err := t.r.Store.Append(ctx, t.task.ID, Step{Kind: Intent, CallID: call.ID}); err != nil {
-		return "", fmt.Errorf("save intent: %w", err)
+		return "", false, fmt.Errorf("save intent: %w", err)
 	}
-	out, err := t.r.Tools.Call(ctx, call)
+	out, err = t.r.Tools.Call(ctx, call)
 	if err != nil {
 		if ctx.Err() != nil {
-			return "", fmt.Errorf("call %s interrupted: %w", call.Name, ctx.Err())
+			return "", false, fmt.Errorf("call %s interrupted: %w", call.Name, ctx.Err())
 		}
-		return fmt.Sprintf("error calling tool %s: %v", call.Name, err), nil
+		return fmt.Sprintf("calling tool %s: %v", call.Name, err), true, nil
 	}
-	return out, nil
+	return out, false, nil
 }
 
 // replay rebuilds the conversation from the steps saved by earlier runs.

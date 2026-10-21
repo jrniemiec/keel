@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"flag"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -29,6 +30,7 @@ func (stubTools) Call(ctx context.Context, call runner.ToolCall) (string, error)
 func main() {
 	dbPath := flag.String("db", defaultDBPath(), "SQLite database file")
 	mem := flag.Bool("mem", false, "use the in-memory store instead of SQLite")
+	flag.Usage = usage
 	flag.Parse()
 
 	var st runner.Store = store.NewMemory()
@@ -50,6 +52,27 @@ func main() {
 		panic(err)
 	}
 	println(result.Text + " in steps: " + strconv.Itoa(result.Steps))
+}
+
+// usage prints the help shown by -h.
+func usage() {
+	out := flag.CommandLine.Output()
+	fmt.Fprintf(out, `keel runs an agent task (for now, a stub model and tool) with a durable step log.
+
+Usage:
+  keel [flags]
+
+Examples:
+  keel                 run task "1" with SQLite at the default path
+  keel -db /tmp/k.db   use another database file
+  keel -mem            use the in-memory store (nothing is saved)
+
+Task "1" finishes on the first run; later runs return its saved answer.
+For a crash-and-resume demo, see: go run ./cmd/demo -h
+
+Flags:
+`)
+	flag.PrintDefaults()
 }
 
 // defaultDBPath returns ~/.keel/data/keel.db.
