@@ -1,3 +1,5 @@
+// Command keel runs agent tasks with a durable step log. For now it runs a
+// stub task, and "keel status" shows the tasks in the database.
 package main
 
 import (

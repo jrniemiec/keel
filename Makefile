@@ -9,7 +9,7 @@ LDFLAGS  ?= -X main.version=$(VERSION)
 
 build:
 	@mkdir -p bin
-	$(GO) build -ldflags '$(LDFLAGS)' -o bin/$(BINARY) .
+	$(GO) build -ldflags '$(LDFLAGS)' -o bin/$(BINARY) ./cmd/keel
 
 install: test build
 	@mkdir -p $(BINDIR)
@@ -34,8 +34,8 @@ lint:
 dist: ## Build release tarballs for darwin arm64+amd64 (usage: make dist VERSION=x.y.z)
 	@if [ -z "$(VERSION)" ]; then echo "usage: make dist VERSION=x.y.z"; exit 1; fi
 	@mkdir -p dist/arm64 dist/amd64
-	GOOS=darwin GOARCH=arm64 $(GO) build -ldflags '-s -w -X main.version=$(VERSION)' -o dist/arm64/$(BINARY) .
-	GOOS=darwin GOARCH=amd64 $(GO) build -ldflags '-s -w -X main.version=$(VERSION)' -o dist/amd64/$(BINARY) .
+	GOOS=darwin GOARCH=arm64 $(GO) build -ldflags '-s -w -X main.version=$(VERSION)' -o dist/arm64/$(BINARY) ./cmd/keel
+	GOOS=darwin GOARCH=amd64 $(GO) build -ldflags '-s -w -X main.version=$(VERSION)' -o dist/amd64/$(BINARY) ./cmd/keel
 	tar -czf dist/$(BINARY)_$(VERSION)_darwin_arm64.tar.gz -C dist/arm64 $(BINARY)
 	tar -czf dist/$(BINARY)_$(VERSION)_darwin_amd64.tar.gz -C dist/amd64 $(BINARY)
 	@rm -rf dist/arm64 dist/amd64
