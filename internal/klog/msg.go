@@ -29,4 +29,9 @@ const (
 
 	// model adapter
 	MsgMaxTokensRetry = "max tokens retry"
+
+	// MCP servers (mcphost); entries carry server=<name>
+	MsgMCPUp          = "mcp server up"
+	MsgMCPTools       = "mcp tools"        // tools=<count> listed
+	MsgMCPToolSkipped = "mcp tool skipped" // not offered to the model
 )

@@ -9,8 +9,33 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/jrniemiec/keel/mcphost"
 	"github.com/jrniemiec/keel/runner"
 )
+
+// demoTools offers the demo's own tools and, with -fs, the filesystem MCP
+// server's (named fs__<tool>). -crash-at counts its calls.
+type demoTools struct {
+	own *fileTools
+	mcp *mcphost.Host // nil without -fs
+}
+
+func (t demoTools) List(ctx context.Context) ([]runner.ToolDef, error) {
+	defs, err := t.own.List(ctx)
+	if err != nil || t.mcp == nil {
+		return defs, err
+	}
+	more, err := t.mcp.List(ctx)
+	return append(defs, more...), err
+}
+
+func (t demoTools) Call(ctx context.Context, call runner.ToolCall) (string, bool, error) {
+	maybeCrash(call.Name)
+	if t.mcp != nil && strings.HasPrefix(call.Name, "fs"+mcphost.Sep) {
+		return t.mcp.Call(ctx, call)
+	}
+	return t.own.Call(ctx, call)
+}
 
 // fileTools are the demo's tools. File paths are kept inside dir.
 type fileTools struct {
@@ -31,7 +56,6 @@ func (t *fileTools) List(ctx context.Context) ([]runner.ToolDef, error) {
 // Call runs a tool. A tool's own failure (bad args, missing file) is an
 // isError result; the demo tools never return err.
 func (t *fileTools) Call(ctx context.Context, call runner.ToolCall) (string, bool, error) {
-	maybeCrash(call.Name)
 	out, err := t.run(call)
 	if err != nil {
 		return err.Error(), true, nil

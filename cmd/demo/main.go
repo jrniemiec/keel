@@ -7,6 +7,7 @@
 //	go run ./cmd/demo -task t1               # resumes and finishes
 //	go run ./cmd/demo -task t1 -log          # prints the saved steps
 //	go run ./cmd/demo -task t2 -model ollama:qwen3.5:9b
+//	go run ./cmd/demo -task t3 -model anthropic:claude-sonnet-5 -fs ~/go/bin/mcp-filesystem-server
 //
 // A fresh scripted run makes 8 calls: 1 model, 2 read_file, 3 model,
 // 4 count_words, 5 count_lines, 6 model, 7 append_file, 8 model (the final
@@ -26,6 +27,7 @@ import (
 	"github.com/jrniemiec/llm"
 
 	"github.com/jrniemiec/keel/internal/klog"
+	"github.com/jrniemiec/keel/mcphost"
 	"github.com/jrniemiec/keel/model"
 	"github.com/jrniemiec/keel/runner"
 	"github.com/jrniemiec/keel/store"
@@ -74,6 +76,7 @@ type config struct {
 	logFile  string
 	logLevel string
 	verbose  bool
+	fs       string // path to mcp-filesystem-server; "" = own file tools
 }
 
 func parseFlags() config {
@@ -89,6 +92,7 @@ func parseFlags() config {
 	flag.StringVar(&cfg.logFile, "log-file", filepath.Join(home, ".keel", "keel.log"), "progress log, appended (tail -f it)")
 	flag.StringVar(&cfg.logLevel, "log-level", "info", "debug, info, warn or error; debug adds prompts and tool payloads")
 	flag.BoolVar(&cfg.verbose, "verbose", false, "also print the log, at debug level, to stderr")
+	flag.StringVar(&cfg.fs, "fs", "", "path to mcp-filesystem-server: read and write files through it (real models only)")
 	flag.Usage = usage
 	flag.Parse()
 	return cfg
@@ -114,6 +118,7 @@ Examples:
   go run ./cmd/demo -task t2 -model ollama:qwen3.5:9b
   go run ./cmd/demo -task t3 -model anthropic:claude-sonnet-5 -thinking
   go run ./cmd/demo -task t4 -model openai:gpt-5
+  go run ./cmd/demo -task t5 -model anthropic:claude-sonnet-5 -fs ~/go/bin/mcp-filesystem-server
 
 A fresh scripted run makes 8 calls: 1 model, 2 read_file, 3 model,
 4 count_words, 5 count_lines, 6 model, 7 append_file, 8 model (the final
@@ -147,12 +152,13 @@ func seedNotes(dir string) {
 
 // runTask runs the demo task with the chosen model and the file tools.
 func runTask(st runner.Store, cfg config) runner.Result {
+	ctx := context.Background()
 	report := reportName(cfg.taskID)
 	var m runner.Model = &scriptModel{report: report}
 	if cfg.model != "scripted" {
 		m = model.NewLLM(llmConfigs(cfg.thinking), systemPrompt)
 	}
-	r := runner.Runner{Model: crashModel{m}, Tools: &fileTools{dir: cfg.dir}, Store: st}
+	tools := demoTools{own: &fileTools{dir: cfg.dir}}
 	task := runner.Task{
 		ID:           cfg.taskID,
 		Goal:         "Count the words and lines in notes.txt and append them to " + report + ".",
@@ -160,7 +166,22 @@ func runTask(st runner.Store, cfg config) runner.Result {
 		MaxSteps:     10,
 		AllowedTools: []string{"read_file", "count_words", "count_lines", "append_file"},
 	}
-	res, err := r.Run(context.Background(), task)
+	if cfg.fs != "" {
+		if cfg.model == "scripted" {
+			log.Fatal("-fs needs a real -model; the scripted one calls the demo's own tools")
+		}
+		dir, err := filepath.Abs(cfg.dir)
+		check(err)
+		host, err := mcphost.Start(ctx, []mcphost.Server{{Name: "fs", Command: cfg.fs, Args: []string{dir}}})
+		check(err)
+		defer host.Close()
+		tools.mcp = host
+		task.Goal = fmt.Sprintf("Count the words and lines in %s and write them to %s.",
+			filepath.Join(dir, "notes.txt"), filepath.Join(dir, report))
+		task.AllowedTools = []string{"count_words", "count_lines", "fs__read_file", "fs__write_file"}
+	}
+	r := runner.Runner{Model: crashModel{m}, Tools: tools, Store: st}
+	res, err := r.Run(ctx, task)
 	check(err)
 	return res
 }
