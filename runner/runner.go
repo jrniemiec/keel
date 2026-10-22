@@ -18,6 +18,17 @@ type ToolDef struct {
 	Name        string          // unique; matched by AllowedTools and ToolCall.Name
 	Description string          // tells the model what the tool does and when to use it
 	InputSchema json.RawMessage // JSON Schema for the arguments, e.g. {"type":"object","properties":{"query":{"type":"string"}}}
+	Hints       Hints           // kept in keel, not sent to the model
+}
+
+// Hints describe a tool's effects (MCP tool annotations). They come from the
+// tool's server and are untrusted; local policy overrides them. Tools sets the
+// MCP defaults when a server omits a hint.
+type Hints struct {
+	ReadOnly    bool // changes nothing
+	Destructive bool // may delete or overwrite; MCP default true
+	Idempotent  bool // repeating with the same args has no further effect
+	OpenWorld   bool // reaches outside systems (web, APIs); MCP default true
 }
 
 // ToolCall is the model's request to run a tool. All fields come from the
@@ -31,7 +42,10 @@ type ToolCall struct {
 // Tools lists and runs the tools available to the model.
 type Tools interface {
 	List(ctx context.Context) ([]ToolDef, error)
-	Call(ctx context.Context, tool ToolCall) (string, error)
+	// Call runs a tool. isError means the tool ran and failed; out is the
+	// error text and the model sees it. err means the tool couldn't be
+	// called (e.g. its server died); the task fails.
+	Call(ctx context.Context, tool ToolCall) (out string, isError bool, err error)
 }
 
 // Runner runs tasks: it drives the loop between the model and the tools.
@@ -348,10 +362,10 @@ func (t *taskRun) act(ctx context.Context, reply Message) error {
 }
 
 // callTool runs call and returns the text for its tool result. A call to a tool
-// the task doesn't allow is not run, and a failed call becomes an error text,
-// both with failed set; the model sees them and can adjust. It returns an
-// error only when the intent can't be saved or ctx is done. Then no result is
-// saved, and resume handles the call again.
+// the task doesn't allow is not run, and a tool that ran and failed returns
+// its error text, both with failed set; the model sees them and can adjust. It
+// returns an error when the intent can't be saved, ctx is done or the tool
+// can't be called. Then no result is saved, and resume handles the call again.
 func (t *taskRun) callTool(ctx context.Context, call ToolCall) (out string, failed bool, err error) {
 	if !slices.ContainsFunc(t.tools, func(d ToolDef) bool { return d.Name == call.Name }) {
 		t.log.Warn(klog.MsgToolDenied, "tool", call.Name, "call_id", call.ID)
@@ -364,14 +378,14 @@ func (t *taskRun) callTool(ctx context.Context, call ToolCall) (out string, fail
 	}
 	t.log.Info(klog.MsgToolCall, "seq", t.seq, "kind", Intent, "tool", call.Name, "call_id", call.ID)
 	t.log.Debug(klog.MsgToolArgs, "seq", t.seq, "args", string(call.Args))
-	out, err = t.r.Tools.Call(ctx, call)
+	out, failed, err = t.r.Tools.Call(ctx, call)
 	if err != nil {
 		if ctx.Err() != nil {
 			return "", false, fmt.Errorf("call %s interrupted: %w", call.Name, ctx.Err())
 		}
-		return fmt.Sprintf("calling tool %s: %v", call.Name, err), true, nil
+		return "", false, fmt.Errorf("call %s: %w", call.Name, err)
 	}
-	return out, false, nil
+	return out, failed, nil
 }
 
 // replay rebuilds the conversation from the steps saved by earlier runs.

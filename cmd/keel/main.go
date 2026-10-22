@@ -29,8 +29,8 @@ type stubTools struct{}
 func (stubTools) List(ctx context.Context) ([]runner.ToolDef, error) {
 	return []runner.ToolDef{{Name: "echo", Description: "desc1"}}, nil
 }
-func (stubTools) Call(ctx context.Context, call runner.ToolCall) (string, error) {
-	return "", nil
+func (stubTools) Call(ctx context.Context, call runner.ToolCall) (string, bool, error) {
+	return "", false, nil
 }
 
 func main() {

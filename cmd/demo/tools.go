@@ -18,16 +18,28 @@ type fileTools struct {
 }
 
 func (t *fileTools) List(ctx context.Context) ([]runner.ToolDef, error) {
+	read := runner.Hints{ReadOnly: true}
 	return []runner.ToolDef{
-		{Name: "read_file", Description: "Read a file in the demo folder.", InputSchema: schema("path")},
-		{Name: "count_words", Description: "Count the words in text.", InputSchema: schema("text")},
-		{Name: "count_lines", Description: "Count the lines in text.", InputSchema: schema("text")},
+		{Name: "read_file", Description: "Read a file in the demo folder.", InputSchema: schema("path"), Hints: read},
+		{Name: "count_words", Description: "Count the words in text.", InputSchema: schema("text"), Hints: read},
+		{Name: "count_lines", Description: "Count the lines in text.", InputSchema: schema("text"), Hints: read},
+		// Appending twice appends twice: not idempotent.
 		{Name: "append_file", Description: "Append text to a file in the demo folder.", InputSchema: schema("path", "text")},
 	}, nil
 }
 
-func (t *fileTools) Call(ctx context.Context, call runner.ToolCall) (string, error) {
+// Call runs a tool. A tool's own failure (bad args, missing file) is an
+// isError result; the demo tools never return err.
+func (t *fileTools) Call(ctx context.Context, call runner.ToolCall) (string, bool, error) {
 	maybeCrash(call.Name)
+	out, err := t.run(call)
+	if err != nil {
+		return err.Error(), true, nil
+	}
+	return out, false, nil
+}
+
+func (t *fileTools) run(call runner.ToolCall) (string, error) {
 	var args struct{ Path, Text string }
 	if err := json.Unmarshal(call.Args, &args); err != nil {
 		return "", fmt.Errorf("bad args: %w", err)
