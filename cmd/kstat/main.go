@@ -1,3 +1,10 @@
+// Command kstat shows keel's tasks and their progress: status, steps,
+// calls, tokens and what each task is doing. It only reads the database,
+// so it can run in its own window next to a running keel; -w keeps it
+// refreshing.
+//
+//	kstat -w
+//	kstat -db ~/.keel/data/demo.db
 package main
 
 import (
@@ -7,6 +14,7 @@ import (
 	"io"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"text/tabwriter"
 	"time"
@@ -14,17 +22,28 @@ import (
 	"github.com/jrniemiec/keel/store"
 )
 
-// statusCmd runs "keel status": a table of tasks, refreshed every second
-// with -w until Ctrl-C.
-func statusCmd(args []string) {
-	fs := flag.NewFlagSet("status", flag.ExitOnError)
-	dbPath := fs.String("db", defaultPath("data", "keel.db"), "SQLite database file")
-	watch := fs.Bool("w", false, "refresh every second until Ctrl-C")
-	fs.Usage = func() {
-		fmt.Fprintf(fs.Output(), "Usage: keel status [-w] [-db file]\n\nShows each task's status and summary, latest first.\n\nFlags:\n")
-		fs.PrintDefaults()
+func main() {
+	dbPath := flag.String("db", defaultDBPath(), "SQLite database file")
+	watch := flag.Bool("w", false, "refresh every second until Ctrl-C")
+	flag.Usage = func() {
+		fmt.Fprintf(flag.CommandLine.Output(), `kstat shows keel's tasks and their progress, latest first. It only
+reads the database; run it in its own window next to keel.
+
+Usage:
+  kstat [-w] [-db file]
+
+Examples:
+  kstat -w                            watch all tasks, refreshed every second
+  kstat -db ~/.keel/data/demo.db      the demo's tasks
+
+NOTE is what a running task is doing, a failed task's error, or a done
+task's answer.
+
+Flags:
+`)
+		flag.PrintDefaults()
 	}
-	_ = fs.Parse(args)
+	flag.Parse()
 
 	db, err := store.OpenSQLite(*dbPath)
 	if err != nil {
@@ -79,6 +98,15 @@ func printTasks(w io.Writer, tasks []store.Summary, now time.Time) {
 			t.TokensIn, t.TokensOut, t.CostUSD, ago(now.Sub(t.Updated)), oneLine(note, 50))
 	}
 	tw.Flush()
+}
+
+// defaultDBPath returns ~/.keel/data/keel.db, keel's default.
+func defaultDBPath() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "keel.db" // fall back to the current directory
+	}
+	return filepath.Join(home, ".keel", "data", "keel.db")
 }
 
 // ago rounds d for display: 4s, 3m, 2h, 5d.

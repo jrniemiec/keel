@@ -10,11 +10,13 @@ LDFLAGS  ?= -X main.version=$(VERSION)
 build:
 	@mkdir -p bin
 	$(GO) build -ldflags '$(LDFLAGS)' -o bin/$(BINARY) ./cmd/keel
+	$(GO) build -o bin/kstat ./cmd/kstat
 
 install: test build
 	@mkdir -p $(BINDIR)
 	ln -sf $(CURDIR)/bin/$(BINARY) $(INSTALL)
-	@echo "Installed: $(INSTALL)"
+	ln -sf $(CURDIR)/bin/kstat $(BINDIR)/kstat
+	@echo "Installed: $(INSTALL), $(BINDIR)/kstat"
 
 run: build
 	bin/$(BINARY)
