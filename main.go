@@ -32,6 +32,11 @@ func (stubTools) Call(ctx context.Context, call runner.ToolCall) (string, error)
 }
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "status" {
+		statusCmd(os.Args[2:])
+		return
+	}
+
 	dbPath := flag.String("db", defaultPath("data", "keel.db"), "SQLite database file")
 	mem := flag.Bool("mem", false, "use the in-memory store instead of SQLite")
 	logFile := flag.String("log-file", defaultPath("keel.log"), "progress log, appended (tail -f it)")
@@ -75,11 +80,14 @@ func usage() {
 
 Usage:
   keel [flags]
+  keel status [-w] [-db file]   show tasks and their summaries (see keel status -h)
 
 Examples:
   keel                 run task "1" with SQLite at the default path
   keel -db /tmp/k.db   use another database file
   keel -mem            use the in-memory store (nothing is saved)
+  keel status -w       watch all tasks, refreshed every second
+  keel status -db ~/.keel/data/demo.db   the demo's tasks
 
 Task "1" finishes on the first run; later runs return its saved answer.
 For a crash-and-resume demo, see: go run ./cmd/demo -h

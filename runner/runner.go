@@ -106,13 +106,31 @@ const (
 type Step struct {
 	Kind   StepKind
 	CallID string  // tool call ID; empty for model replies
-	Msg    Message // the reply or tool result; empty for intents
+	Msg    Message // the reply or tool result; for an intent, ToolCalls holds the call
 }
 
-// Store persists a task's steps so Run can resume after a crash.
+// Task statuses, kept by the Store with each task.
+const (
+	TaskRunning = "running"
+	TaskWaiting = "waiting" // for approval (not used yet)
+	TaskDone    = "done"
+	TaskFailed  = "failed"
+)
+
+// Store persists a task's steps so Run can resume after a crash, and a
+// summary of each task (status, counters, what it's doing) for keel status.
 type Store interface {
-	Append(ctx context.Context, taskID string, s Step) error // durable when it returns
+	// StartTask records task as running: a new task, or one resumed.
+	StartTask(ctx context.Context, task Task) error
+	// Append saves s and updates the task's summary in one transaction;
+	// durable when it returns.
+	Append(ctx context.Context, taskID string, s Step) error
 	Load(ctx context.Context, taskID string) ([]Step, error) // in append order
+	// SetCurrent records what the task is doing, e.g. "asking model".
+	SetCurrent(ctx context.Context, taskID, current string) error
+	// FinishTask records the end of a task: status TaskDone with its result,
+	// or TaskFailed with errText.
+	FinishTask(ctx context.Context, taskID, status, result, errText string) error
 }
 
 // Run executes task as a loop, one model call per step:
@@ -128,6 +146,9 @@ type Store interface {
 // Every reply, intent and tool result is appended to r.Store first, so a
 // restarted Run resumes from the log instead of starting over.
 // It stops when the model is done or task.MaxSteps is reached.
+//
+// The task's status in r.Store ends as done or failed. If ctx is cancelled
+// (shutdown), it stays running, so the task is resumed later.
 func (r *Runner) Run(ctx context.Context, task Task) (Result, error) {
 	began := time.Now()
 	log := r.Logger
@@ -136,18 +157,40 @@ func (r *Runner) Run(ctx context.Context, task Task) (Result, error) {
 	}
 	log = log.With("task", task.ID)
 
-	t, err := r.start(ctx, task, log)
-	if err != nil {
+	if err := r.check(task); err != nil {
 		log.Error(klog.MsgTaskFailed, "err", err)
 		return Result{}, fmt.Errorf("task %s: %w", task.ID, err)
 	}
-	text, err := t.run(ctx)
-	if err != nil {
-		log.Error(klog.MsgTaskFailed, "model_calls", t.steps, "dur", since(began), "err", err)
-		return Result{Steps: t.steps}, fmt.Errorf("task %s: %w", task.ID, err)
+	if err := r.Store.StartTask(ctx, task); err != nil {
+		log.Error(klog.MsgTaskFailed, "err", err)
+		return Result{}, fmt.Errorf("task %s: save task: %w", task.ID, err)
 	}
-	log.Info(klog.MsgTaskDone, "model_calls", t.steps, "dur", since(began))
-	return Result{Text: text, Steps: t.steps}, nil
+
+	t, err := r.start(ctx, task, log)
+	var text string
+	if err == nil {
+		text, err = t.run(ctx)
+	}
+	steps := 0
+	if t != nil {
+		steps = t.steps
+	}
+	if err != nil {
+		if ctx.Err() != nil {
+			log.Warn(klog.MsgTaskStopped, "model_calls", steps, "dur", since(began), "err", err)
+			return Result{Steps: steps}, fmt.Errorf("task %s: %w", task.ID, err)
+		}
+		log.Error(klog.MsgTaskFailed, "model_calls", steps, "dur", since(began), "err", err)
+		if serr := r.Store.FinishTask(ctx, task.ID, TaskFailed, "", err.Error()); serr != nil {
+			err = errors.Join(err, fmt.Errorf("save status: %w", serr))
+		}
+		return Result{Steps: steps}, fmt.Errorf("task %s: %w", task.ID, err)
+	}
+	log.Info(klog.MsgTaskDone, "model_calls", steps, "dur", since(began))
+	if err := r.Store.FinishTask(ctx, task.ID, TaskDone, text, ""); err != nil {
+		return Result{Text: text, Steps: steps}, fmt.Errorf("task %s: save status: %w", task.ID, err)
+	}
+	return Result{Text: text, Steps: steps}, nil
 }
 
 // taskRun is the state of one Run.
@@ -163,18 +206,22 @@ type taskRun struct {
 	log   *klog.Logger    // with task=<id>
 }
 
-// start checks the runner and the task, and rebuilds the task's state from the store.
-func (r *Runner) start(ctx context.Context, task Task, log *klog.Logger) (*taskRun, error) {
+// check checks the runner and the task before anything is saved.
+func (r *Runner) check(task Task) error {
 	if r.Model == nil || r.Tools == nil || r.Store == nil {
-		return nil, errors.New("runner needs Model, Tools and Store")
+		return errors.New("runner needs Model, Tools and Store")
 	}
 	if task.MaxSteps <= 0 {
-		return nil, errors.New("max steps must be > 0")
+		return errors.New("max steps must be > 0")
 	}
 	if task.Model == "" {
-		return nil, errors.New("model must be specified")
+		return errors.New("model must be specified")
 	}
+	return nil
+}
 
+// start lists the task's tools and rebuilds its state from the store.
+func (r *Runner) start(ctx context.Context, task Task, log *klog.Logger) (*taskRun, error) {
 	all, err := r.Tools.List(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("list tools: %w", err)
@@ -248,6 +295,9 @@ func ends(reply Message) (bool, error) {
 
 // ask gets the next reply from the model, saves it and adds it to the conversation.
 func (t *taskRun) ask(ctx context.Context) (Message, error) {
+	if err := t.r.Store.SetCurrent(ctx, t.task.ID, "asking "+t.task.Model); err != nil {
+		return Message{}, fmt.Errorf("save status: %w", err)
+	}
 	began := time.Now()
 	reply, err := t.r.Model.Ask(ctx, t.task.Model, t.msgs, t.tools)
 	if err != nil {
@@ -309,7 +359,7 @@ func (t *taskRun) callTool(ctx context.Context, call ToolCall) (out string, fail
 	}
 	// Intent before the side effect. On resume, an intent without a
 	// result is run again; safe only for idempotent tools (approval later).
-	if err := t.save(ctx, Step{Kind: Intent, CallID: call.ID}); err != nil {
+	if err := t.save(ctx, Step{Kind: Intent, CallID: call.ID, Msg: Message{ToolCalls: []ToolCall{call}}}); err != nil {
 		return "", false, fmt.Errorf("save intent: %w", err)
 	}
 	t.log.Info(klog.MsgToolCall, "seq", t.seq, "kind", Intent, "tool", call.Name, "call_id", call.ID)

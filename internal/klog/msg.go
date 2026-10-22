@@ -9,10 +9,11 @@ const (
 	MsgCrash   = "demo crash" // cmd/demo: -crash-at exits the process
 
 	// a task (runner); entries carry task=<id>
-	MsgTaskStart  = "task start"
-	MsgTaskResume = "task resume"
-	MsgTaskDone   = "task done"
-	MsgTaskFailed = "task failed"
+	MsgTaskStart   = "task start"
+	MsgTaskResume  = "task resume"
+	MsgTaskDone    = "task done"
+	MsgTaskFailed  = "task failed"
+	MsgTaskStopped = "task stopped" // ctx cancelled; stays running, resumed later
 
 	// a step; entries also carry seq and kind
 	MsgModelReply  = "model reply"
