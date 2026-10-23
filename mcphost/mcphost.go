@@ -4,6 +4,7 @@
 package mcphost
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -39,6 +40,7 @@ type Server struct {
 // Host holds a session with each started server.
 type Host struct {
 	sessions map[string]*mcp.ClientSession // by server name
+	stderr   map[string]*stderrLog         // each server's stderr, by server name
 	maxOut   int                           // bytes of one tool result kept
 }
 
@@ -46,7 +48,7 @@ type Host struct {
 // tool result, so a large file read can't fill the model's context. On error,
 // the servers already started are closed.
 func Start(ctx context.Context, servers []Server, maxOut int) (*Host, error) {
-	h := &Host{sessions: map[string]*mcp.ClientSession{}, maxOut: maxOut}
+	h := &Host{sessions: map[string]*mcp.ClientSession{}, stderr: map[string]*stderrLog{}, maxOut: maxOut}
 	client := mcp.NewClient(&mcp.Implementation{Name: "keel", Version: "dev"}, nil)
 	for _, s := range servers {
 		if !validName.MatchString(s.Name) || strings.Contains(s.Name, Sep) {
@@ -59,9 +61,15 @@ func Start(ctx context.Context, servers []Server, maxOut int) (*Host, error) {
 		}
 		cmd := exec.Command(s.Command, s.Args...)
 		cmd.Env = append(os.Environ(), s.Env...)
+		// CommandTransport takes stdin and stdout and leaves Stderr as set
+		// here; exec copies the server's stderr into it.
+		stderr := &stderrLog{server: s.Name}
+		cmd.Stderr = stderr
+		h.stderr[s.Name] = stderr
 		cs, err := client.Connect(ctx, &mcp.CommandTransport{Command: cmd}, nil)
 		if err != nil {
 			h.Close()
+			stderr.flush() // why the server failed to start, if it said so
 			return nil, fmt.Errorf("start mcp server %s: %w", s.Name, err)
 		}
 		h.sessions[s.Name] = cs
@@ -184,7 +192,7 @@ func text(res *mcp.CallToolResult, maxOut int) string {
 }
 
 // Close ends the sessions; each server's stdin is closed, and the process is
-// stopped if it doesn't exit.
+// stopped if it doesn't exit. Then a last stderr line without '\n' is logged.
 func (h *Host) Close() error {
 	var errs []error
 	for name, cs := range h.sessions {
@@ -192,6 +200,62 @@ func (h *Host) Close() error {
 			errs = append(errs, fmt.Errorf("close mcp server %s: %w", name, err))
 		}
 		delete(h.sessions, name)
+		if stderr := h.stderr[name]; stderr != nil {
+			stderr.flush() // the process has exited (cmd.Wait): no more writes
+		}
 	}
 	return errors.Join(errs...)
+}
+
+// maxStderrLine is the bytes of one stderr line kept in the log.
+const maxStderrLine = 2000
+
+// stderrLog is a server's stderr: it logs each line as an mcp stderr entry.
+// exec copies the process's stderr into Write from one goroutine, so it
+// needs no lock.
+type stderrLog struct {
+	server  string
+	log     *klog.Logger // nil = klog.Default()
+	partial []byte       // a line not yet ended by '\n'
+}
+
+func (w *stderrLog) Write(p []byte) (int, error) {
+	w.partial = append(w.partial, p...)
+	for {
+		i := bytes.IndexByte(w.partial, '\n')
+		if i < 0 {
+			break
+		}
+		w.logLine(w.partial[:i])
+		w.partial = w.partial[i+1:]
+	}
+	if len(w.partial) > maxStderrLine { // a long line without '\n': log what there is
+		w.logLine(w.partial)
+		w.partial = nil
+	}
+	return len(p), nil
+}
+
+// flush logs a last line without '\n'; called after the process exits.
+func (w *stderrLog) flush() {
+	if len(w.partial) > 0 {
+		w.logLine(w.partial)
+		w.partial = nil
+	}
+}
+
+func (w *stderrLog) logLine(line []byte) {
+	line = bytes.TrimRight(line, "\r")
+	if len(line) == 0 {
+		return
+	}
+	text := string(line)
+	if len(text) > maxStderrLine {
+		text = text[:maxStderrLine] + "…"
+	}
+	log := w.log
+	if log == nil {
+		log = klog.Default()
+	}
+	log.Info(klog.MsgMCPStderr, "server", w.server, "line", text)
 }

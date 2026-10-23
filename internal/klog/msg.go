@@ -38,6 +38,7 @@ const (
 
 	// MCP servers (mcphost); entries carry server=<name>
 	MsgMCPUp          = "mcp server up"
+	MsgMCPStderr      = "mcp stderr"       // a line the server wrote to stderr
 	MsgMCPTools       = "mcp tools"        // tools=<count> listed
 	MsgMCPToolSkipped = "mcp tool skipped" // not offered to the model
 )
