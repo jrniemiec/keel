@@ -20,7 +20,8 @@
   // The system prompt: how the model should work.
   "system": "You are running a task with tools. Use the tools to do the work. When the task is done, reply with a short summary.",
 
-  // Servers from the keel config, and the tools the model may use.
+  // Servers from the keel config, and the tools the model may use: names or
+  // patterns such as "fs__read_*" (path.Match). Each must match a tool.
   "servers": ["fs"],
   "allow": [
     "fs__list_allowed_directories",

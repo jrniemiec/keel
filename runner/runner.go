@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"path"
 	"slices"
 	"time"
 
@@ -12,10 +13,10 @@ import (
 )
 
 // ToolDef describes a tool to the model. Tools.List returns them (from the MCP
-// server's tools/list); Run filters them by Task.AllowedTools and passes the
+// server's tools/list); Run matches them with Task.AllowedTools and passes the
 // rest to the model. How a tool is run stays inside Tools.
 type ToolDef struct {
-	Name        string          // unique; matched by AllowedTools and ToolCall.Name
+	Name        string          // unique; matched by AllowedTools patterns and ToolCall.Name
 	Description string          // tells the model what the tool does and when to use it
 	InputSchema json.RawMessage // JSON Schema for the arguments, e.g. {"type":"object","properties":{"query":{"type":"string"}}}
 	Hints       Hints           // kept in keel, not sent to the model
@@ -61,7 +62,7 @@ type Runner struct {
 type Task struct {
 	ID           string
 	Goal         string   // instructions for the model
-	AllowedTools []string // tools by name
+	AllowedTools []string // tool names or path.Match patterns, e.g. "fs__read_*"
 	Model        string   // e.g. "anthropic:claude-sonnet-5"
 	MaxSteps     int
 
@@ -186,12 +187,17 @@ func (r *Runner) Run(ctx context.Context, task Task) (Result, error) {
 		log.Error(klog.MsgTaskFailed, "err", err)
 		return Result{}, fmt.Errorf("task %s: %w", task.ID, err)
 	}
+	tools, err := r.allowedTools(ctx, task)
+	if err != nil {
+		log.Error(klog.MsgTaskFailed, "err", err)
+		return Result{}, fmt.Errorf("task %s: %w", task.ID, err)
+	}
 	if err := r.Store.StartTask(ctx, task); err != nil {
 		log.Error(klog.MsgTaskFailed, "err", err)
 		return Result{}, fmt.Errorf("task %s: save task: %w", task.ID, err)
 	}
 
-	t, err := r.start(ctx, task, log)
+	t, err := r.start(ctx, task, tools, log)
 	var text string
 	if err == nil {
 		text, err = t.run(ctx)
@@ -245,17 +251,27 @@ func (r *Runner) check(task Task) error {
 	return nil
 }
 
-// start lists the task's tools and rebuilds its state from the store.
-func (r *Runner) start(ctx context.Context, task Task, log *klog.Logger) (*taskRun, error) {
-	all, err := r.Tools.List(ctx)
+// allowedTools lists the tools and returns those task.AllowedTools matches.
+// A pattern that matches no tool is an error, so a typo stops the task
+// before it is saved.
+func (r *Runner) allowedTools(ctx context.Context, task Task) ([]ToolDef, error) {
+	listed, err := r.Tools.List(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("list tools: %w", err)
 	}
-	tools := filterTools(all, task.AllowedTools)
-	if len(tools) == 0 {
+	allowed, unmatchedPatterns := matchTools(listed, task.AllowedTools)
+	if len(unmatchedPatterns) > 0 {
+		return nil, fmt.Errorf("allow %q: no tool matches", unmatchedPatterns)
+	}
+	if len(allowed) == 0 {
 		return nil, errors.New("no allowed tools available")
 	}
+	return allowed, nil
+}
 
+// start rebuilds the task's state from the store; tools are the task's
+// allowed tools.
+func (r *Runner) start(ctx context.Context, task Task, tools []ToolDef, log *klog.Logger) (*taskRun, error) {
 	history, err := r.Store.Load(ctx, task.ID)
 	if err != nil {
 		return nil, fmt.Errorf("load: %w", err)
@@ -432,13 +448,25 @@ func since(began time.Time) time.Duration {
 	return time.Since(began).Round(time.Millisecond)
 }
 
-// filterTools returns the tools from all whose names are in allowed.
-func filterTools(all []ToolDef, allowed []string) []ToolDef {
-	var out []ToolDef
-	for _, t := range all {
-		if slices.Contains(allowed, t.Name) {
-			out = append(out, t)
+// matchTools returns the listed tools whose names match one of patterns
+// (path.Match, e.g. "fs__read_*"), and the patterns that matched no tool.
+func matchTools(listed []ToolDef, patterns []string) (matched []ToolDef, unmatchedPatterns []string) {
+	patternMatched := make([]bool, len(patterns))
+	for _, tool := range listed {
+		toolMatched := false
+		for i, pattern := range patterns {
+			if ok, _ := path.Match(pattern, tool.Name); ok {
+				patternMatched[i], toolMatched = true, true
+			}
+		}
+		if toolMatched {
+			matched = append(matched, tool)
 		}
 	}
-	return out
+	for i, pattern := range patterns {
+		if !patternMatched[i] {
+			unmatchedPatterns = append(unmatchedPatterns, pattern)
+		}
+	}
+	return matched, unmatchedPatterns
 }

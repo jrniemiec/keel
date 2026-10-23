@@ -16,6 +16,7 @@ import (
 	"io/fs"
 	"maps"
 	"os"
+	"path"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -134,7 +135,7 @@ type TaskConfig struct {
 	Thinking bool     `json:"thinking"`  // Anthropic: adaptive thinking; Ollama: think
 	System   string   `json:"system"`    // system prompt
 	Servers  []string `json:"servers"`   // from the keel config
-	Allow    []string `json:"allow"`     // tools the model may use, e.g. "fs__read_file"
+	Allow    []string `json:"allow"`     // tools the model may use: names or path.Match patterns, e.g. "fs__read_*"
 	MaxSteps int      `json:"max_steps"` // model calls
 }
 
@@ -291,6 +292,8 @@ func CheckTaskConfig(kc KeelConfig, tc TaskConfig) error {
 		server, name, ok := strings.Cut(tool, mcphost.Sep)
 		if !ok || name == "" || !slices.Contains(tc.Servers, server) {
 			errs = append(errs, fmt.Errorf("allow %q: want <server>%s<tool> with a server of this task", tool, mcphost.Sep))
+		} else if _, err := path.Match(name, ""); err != nil {
+			errs = append(errs, fmt.Errorf("allow %q: bad pattern", tool))
 		}
 	}
 	if len(errs) > 0 {

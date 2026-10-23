@@ -134,6 +134,9 @@ func TestCheckTaskConfig(t *testing.T) {
 		{"no allow", func(tc *TaskConfig) { tc.Allow = nil }, "allow is empty"},
 		{"tool of another server", func(tc *TaskConfig) { tc.Allow = []string{"web__fetch"} }, `allow "web__fetch"`},
 		{"tool without server", func(tc *TaskConfig) { tc.Allow = []string{"read_file"} }, `allow "read_file"`},
+		{"bad pattern", func(tc *TaskConfig) { tc.Allow = []string{"fs__[read"} }, "bad pattern"},
+		{"wildcard server", func(tc *TaskConfig) { tc.Allow = []string{"*__read_file"} }, `allow "*__read_file"`},
+		{"bare wildcard", func(tc *TaskConfig) { tc.Allow = []string{"*"} }, `allow "*"`},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
