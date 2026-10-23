@@ -1,9 +1,11 @@
 // Command keel runs agent tasks with a durable step log. A task is described
 // by a task config; keel run starts it, or resumes it if it was interrupted.
-// Watch progress with kstat in another window.
+// keel tasks and keel steps show the saved tasks; watch progress with kstat
+// in another window.
 //
 //	keel run notes          # ~/.keel/config/tasks/notes.jsonc
 //	keel run --id n2 notes  # same task config, a new task
+//	keel steps notes        # what the task did, step by step
 package main
 
 import (
@@ -28,12 +30,14 @@ import (
 
 var version = "dev" // set by the Makefile
 
-// helpText is printed by keel -h, keel --help and keel run -h. It is the only
-// help, so keep it next to the flags in run and in step with them.
+// helpText is printed by keel -h, keel --help and each command's -h. It is
+// the only help, so keep it in step with the commands' flags.
 const helpText = `keel runs agent tasks with a durable step log.
 
 Usage:
   keel run [flags] <task>
+  keel tasks [flags]
+  keel steps [flags] <task-id>
 
 Commands:
   run    Run a task, or resume it from its last saved step after a crash
@@ -43,6 +47,11 @@ Commands:
          name, or --id). <task> is a task name, read
          from $KEEL_HOME/config/tasks/<task>.jsonc, or the path of a task
          config (it has a "/" or ends in .jsonc).
+  tasks  List the tasks in the database, latest first, once. For live
+         progress, use kstat -w.
+  steps  Show a task's steps in order: model replies, tool calls and
+         results. <task-id> is a task ID in the database (keel tasks),
+         not a task config.
 
 Flags for run:
   -c, --config <file>      use this keel config (servers, db, log) instead of $KEEL_HOME/config/keel.jsonc (KEEL_HOME default ~/.keel)
@@ -50,6 +59,13 @@ Flags for run:
   -i, --id <id>            task ID instead of the name in the task config; a new ID starts a new task, a used one resumes it
   -l, --log-level <level>  lowest level written to the log file: debug (adds model text, tool args and output), info, warn, error; overrides log_level in the keel config
   -v, --verbose            also print the log to the terminal, including debug entries
+  -h, --help               show this help
+
+Flags for tasks and steps:
+  -c, --config <file>      use this keel config to find the database
+  -d, --db <file>          read this database instead of the one in the keel config
+  -s, --status <status>    tasks only: show only running, waiting, failed or done tasks
+      --full               tasks: NOTE whole, on one line; steps: text whole, below its row, and tool args
   -h, --help               show this help
 
 Files ($KEEL_HOME, default ~/.keel):
@@ -64,6 +80,8 @@ Examples:
   keel run --id n2 notes                      same task config, a new task
   keel run examples/config/tasks/notes.jsonc  a task config given by path
   keel run -d /tmp/test.db -v notes           experiment in a separate database
+  keel tasks -s waiting                       blocked tasks and why
+  keel steps --full notes                     everything the task said and did
 
 Log file: log_file in the keel config (default ~/.keel/keel.log); follow it with tail -f.
 Watch all tasks: kstat -w.
@@ -73,7 +91,7 @@ API keys are read from the environment, never from a config file:
   Ollama models      no key
 `
 
-const usageLine = "usage: keel run [flags] <task>\nrun 'keel -h' for help"
+const usageLine = "usage: keel run [flags] <task> | keel tasks [flags] | keel steps [flags] <task-id>\nrun 'keel -h' for help"
 
 // usageError is a mistake on the command line: exit 2 with the usage line.
 type usageError struct{ msg string }
@@ -103,6 +121,10 @@ func dispatch(args []string) error {
 		return nil
 	case "run":
 		return run(args[1:])
+	case "tasks":
+		return tasks(args[1:], os.Stdout)
+	case "steps":
+		return steps(args[1:], os.Stdout)
 	default:
 		return usageError{fmt.Sprintf("unknown command %q", args[0])}
 	}
@@ -145,18 +167,9 @@ func newRunFlags() (*flag.FlagSet, *runFlags) {
 // run is "keel run": it starts or resumes the task in a task config.
 func run(args []string) error {
 	flags, f := newRunFlags()
-
-	// Flags may come before or after the task config.
-	var paths []string
-	for {
-		if err := flags.Parse(args); err != nil {
-			return usageError{err.Error()}
-		}
-		if flags.NArg() == 0 {
-			break
-		}
-		paths = append(paths, flags.Arg(0))
-		args = flags.Args()[1:]
+	paths, err := parseArgs(flags, args)
+	if err != nil {
+		return err
 	}
 	if f.help {
 		fmt.Print(helpText)
