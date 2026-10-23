@@ -160,6 +160,23 @@ func summarize(s runner.Step) delta {
 	return d
 }
 
+// BlockTask implements runner.Store: status waiting with reason, no
+// finished_at. An unknown task updates no row.
+func (sl *SQLite) BlockTask(ctx context.Context, taskID, reason string) error {
+	sl.mu.Lock()
+	defer sl.mu.Unlock()
+
+	at := now()
+	err := sqlitex.Execute(sl.conn, `
+		UPDATE tasks SET status = 'waiting', last_error = ?, current = 'blocked', updated_at = ?
+		WHERE id = ?`,
+		&sqlitex.ExecOptions{Args: []any{reason, at, taskID}})
+	if err != nil {
+		return fmt.Errorf("block task: %w", err)
+	}
+	return nil
+}
+
 // SetCurrent implements runner.Store.
 func (sl *SQLite) SetCurrent(ctx context.Context, taskID, current string) error {
 	sl.mu.Lock()

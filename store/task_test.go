@@ -79,6 +79,43 @@ func TestToolSnapshotStep(t *testing.T) {
 	}
 }
 
+func TestBlockTask(t *testing.T) {
+	db, err := OpenSQLite(filepath.Join(t.TempDir(), "keel.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	ctx := context.Background()
+	task := runner.Task{ID: "t1", Goal: "g", Model: "ollama:m", MaxSteps: 5}
+	status := func() Summary {
+		t.Helper()
+		tasks, err := db.Tasks(ctx)
+		if err != nil || len(tasks) != 1 {
+			t.Fatalf("tasks = %v, %v", tasks, err)
+		}
+		return tasks[0]
+	}
+
+	if err := db.BlockTask(ctx, "missing", "x"); err != nil {
+		t.Fatalf("block a missing task: %v", err)
+	}
+	if err := db.StartTask(ctx, task); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.BlockTask(ctx, "t1", "tool server down"); err != nil {
+		t.Fatal(err)
+	}
+	if s := status(); s.Status != runner.TaskWaiting || s.LastError != "tool server down" || s.Current != "blocked" || !s.Finished.IsZero() {
+		t.Errorf("after BlockTask: %+v", s)
+	}
+	if err := db.StartTask(ctx, task); err != nil {
+		t.Fatal(err)
+	}
+	if s := status(); s.Status != runner.TaskRunning {
+		t.Errorf("after StartTask: status %q, want running", s.Status)
+	}
+}
+
 func TestCheckSameEmptySlices(t *testing.T) {
 	if err := checkSame([]byte(`{"ID":"t","AllowedTools":null}`), runner.Task{ID: "t", AllowedTools: []string{}}); err != nil {
 		t.Error(err)

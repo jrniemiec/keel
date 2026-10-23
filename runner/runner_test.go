@@ -59,6 +59,7 @@ type memStore struct {
 	steps    []Step
 	started  bool
 	finished string // the status FinishTask got; "" = not called
+	blocked  string // the reason BlockTask got; "" = not called
 }
 
 func (s *memStore) StartTask(ctx context.Context, task Task) error {
@@ -75,6 +76,10 @@ func (s *memStore) Load(ctx context.Context, taskID string) ([]Step, error) {
 func (s *memStore) SetCurrent(ctx context.Context, taskID, current string) error { return nil }
 func (s *memStore) FinishTask(ctx context.Context, taskID, status, result, errText string) error {
 	s.finished = status
+	return nil
+}
+func (s *memStore) BlockTask(ctx context.Context, taskID, reason string) error {
+	s.blocked = reason
 	return nil
 }
 
@@ -106,7 +111,7 @@ func TestRunUnmatchedPatternSavesNothing(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), `allow ["fs__raed_file"]: no tool matches`) {
 		t.Errorf("err = %v, want no tool matches", err)
 	}
-	if store.started || len(store.steps) > 0 || model.calls > 0 {
+	if store.started || len(store.steps) > 0 || model.calls > 0 || store.finished != "" || store.blocked != "" {
 		t.Error("task saved or model called before the allow-list was checked")
 	}
 }
@@ -185,6 +190,9 @@ func TestRunComparesToolSnapshot(t *testing.T) {
 			}
 			if store.started || len(store.steps) > 1 || model.calls > 0 {
 				t.Error("task saved or model called after the tools changed")
+			}
+			if !strings.Contains(store.blocked, tt.wantErr) || store.finished != "" {
+				t.Errorf("blocked %q, finished %q; want blocked with the reason, not finished", store.blocked, store.finished)
 			}
 			if !strings.Contains(logged.String(), `msg="task blocked"`) || strings.Contains(logged.String(), `msg="task failed"`) {
 				t.Errorf("want task blocked, not task failed; log:\n%s", logged.String())
@@ -286,8 +294,8 @@ func TestRunServerDown(t *testing.T) {
 			if !errors.Is(err, ErrServerDown) {
 				t.Errorf("err = %v, want ErrServerDown", err)
 			}
-			if store.finished != "" {
-				t.Errorf("FinishTask(%q) called; want the task left running", store.finished)
+			if store.finished != "" || !strings.Contains(store.blocked, "tool server down") {
+				t.Errorf("finished %q, blocked %q; want blocked, not finished", store.finished, store.blocked)
 			}
 			last := store.steps[len(store.steps)-1]
 			if last.Kind != Intent || last.CallID != "c1" {
@@ -368,6 +376,9 @@ func TestRunIntentWithoutResult(t *testing.T) {
 			}
 			if len(store.steps) != saved || store.finished != "" {
 				t.Errorf("steps %d (want %d), finished %q; want nothing saved", len(store.steps), saved, store.finished)
+			}
+			if !strings.Contains(store.blocked, "fs__write_file (call c1) may have run") {
+				t.Errorf("blocked %q, want the reason", store.blocked)
 			}
 		})
 	}

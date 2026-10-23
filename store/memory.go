@@ -48,3 +48,6 @@ func (ss *Memory) SetCurrent(ctx context.Context, taskID, current string) error 
 func (ss *Memory) FinishTask(ctx context.Context, taskID, status, result, errText string) error {
 	return nil
 }
+func (ss *Memory) BlockTask(ctx context.Context, taskID, reason string) error {
+	return nil
+}

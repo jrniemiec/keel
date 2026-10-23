@@ -78,7 +78,8 @@ Flags:
 }
 
 // printTasks writes one line per task. NOTE is what a running task is doing,
-// a failed task's error, or a finished task's answer.
+// why a waiting task is blocked, a failed task's error, or a finished task's
+// answer.
 func printTasks(w io.Writer, tasks []store.Summary, now time.Time) {
 	if len(tasks) == 0 {
 		fmt.Fprintln(w, "no tasks")
@@ -91,7 +92,7 @@ func printTasks(w io.Writer, tasks []store.Summary, now time.Time) {
 		switch t.Status {
 		case "done":
 			note = t.Result
-		case "failed":
+		case "failed", "waiting":
 			note = t.LastError
 		}
 		fmt.Fprintf(tw, "%s\t%s\t%s\t%d\t%d\t%d\t%d\t%d/%d\t$%.4f\t%s ago\t%s\n",

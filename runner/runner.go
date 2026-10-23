@@ -161,7 +161,7 @@ type Step struct {
 // Task statuses, kept by the Store with each task.
 const (
 	TaskRunning = "running"
-	TaskWaiting = "waiting" // for approval (not used yet)
+	TaskWaiting = "waiting" // blocked: needs a human (see Store.BlockTask); later also approvals
 	TaskDone    = "done"
 	TaskFailed  = "failed"
 )
@@ -181,6 +181,10 @@ type Store interface {
 	// FinishTask records the end of a task: status TaskDone with its result,
 	// or TaskFailed with errText.
 	FinishTask(ctx context.Context, taskID, status, result, errText string) error
+	// BlockTask records a task stopped by its environment: status
+	// TaskWaiting, with reason. StartTask sets it running again. A task not
+	// in the store is left out.
+	BlockTask(ctx context.Context, taskID, reason string) error
 }
 
 // Run executes task as a loop, one model call per step:
@@ -208,52 +212,65 @@ func (r *Runner) Run(ctx context.Context, task Task) (Result, error) {
 	log = log.With("task", task.ID)
 
 	if err := r.check(task); err != nil {
-		log.Error(klog.MsgTaskFailed, "err", err)
-		return Result{}, fmt.Errorf("task %s: %w", task.ID, err)
+		return r.end(ctx, log, task, false, began, Result{}, err)
 	}
 	history, tools, err := r.prepare(ctx, task, log)
-	if errors.Is(err, ErrToolsChanged) {
-		log.Error(klog.MsgTaskBlocked, "err", err) // status unchanged; resumes once the tools match
-		return Result{}, fmt.Errorf("task %s: %w", task.ID, err)
-	}
 	if err != nil {
-		log.Error(klog.MsgTaskFailed, "err", err)
-		return Result{}, fmt.Errorf("task %s: %w", task.ID, err)
+		return r.end(ctx, log, task, false, began, Result{}, err)
 	}
 	if err := r.Store.StartTask(ctx, task); err != nil {
-		log.Error(klog.MsgTaskFailed, "err", err)
-		return Result{}, fmt.Errorf("task %s: save task: %w", task.ID, err)
+		return r.end(ctx, log, task, false, began, Result{}, fmt.Errorf("save task: %w", err))
 	}
 
 	t, err := r.start(ctx, task, history, tools, log)
-	var text string
+	var res Result
 	if err == nil {
-		text, err = t.run(ctx)
+		res.Text, err = t.run(ctx)
 	}
-	steps := 0
 	if t != nil {
-		steps = t.steps
+		res.Steps = t.steps
+	}
+	return r.end(ctx, log, task, true, began, res, err)
+}
+
+// end records how a run ended, in the log and in the store, and returns res
+// and err with the task's ID added:
+//   - done: FinishTask(TaskDone);
+//   - stopped (ctx done): no change, the task stays running;
+//   - blocked by its environment (see blocked): BlockTask, status TaskWaiting;
+//   - failed: FinishTask(TaskFailed) once the task is saved (started);
+//     before that nothing is saved.
+func (r *Runner) end(ctx context.Context, log *klog.Logger, task Task, started bool, began time.Time, res Result, err error) (Result, error) {
+	attrs := []any{"model_calls", res.Steps, "dur", since(began)}
+	var saveErr error
+	switch {
+	case err == nil:
+		log.Info(klog.MsgTaskDone, attrs...)
+		saveErr = r.Store.FinishTask(ctx, task.ID, TaskDone, res.Text, "")
+	case ctx.Err() != nil:
+		log.Warn(klog.MsgTaskStopped, append(attrs, "err", err)...)
+	case blocked(err):
+		log.Error(klog.MsgTaskBlocked, append(attrs, "err", err)...)
+		saveErr = r.Store.BlockTask(ctx, task.ID, err.Error())
+	default:
+		log.Error(klog.MsgTaskFailed, append(attrs, "err", err)...)
+		if started {
+			saveErr = r.Store.FinishTask(ctx, task.ID, TaskFailed, "", err.Error())
+		}
+	}
+	if saveErr != nil {
+		err = errors.Join(err, fmt.Errorf("save status: %w", saveErr))
 	}
 	if err != nil {
-		if ctx.Err() != nil {
-			log.Warn(klog.MsgTaskStopped, "model_calls", steps, "dur", since(began), "err", err)
-			return Result{Steps: steps}, fmt.Errorf("task %s: %w", task.ID, err)
-		}
-		if errors.Is(err, ErrServerDown) || errors.Is(err, ErrOutcomeUnknown) { // not the task's fault: stays running
-			log.Error(klog.MsgTaskBlocked, "model_calls", steps, "dur", since(began), "err", err)
-			return Result{Steps: steps}, fmt.Errorf("task %s: %w", task.ID, err)
-		}
-		log.Error(klog.MsgTaskFailed, "model_calls", steps, "dur", since(began), "err", err)
-		if serr := r.Store.FinishTask(ctx, task.ID, TaskFailed, "", err.Error()); serr != nil {
-			err = errors.Join(err, fmt.Errorf("save status: %w", serr))
-		}
-		return Result{Steps: steps}, fmt.Errorf("task %s: %w", task.ID, err)
+		return Result{Steps: res.Steps}, fmt.Errorf("task %s: %w", task.ID, err)
 	}
-	log.Info(klog.MsgTaskDone, "model_calls", steps, "dur", since(began))
-	if err := r.Store.FinishTask(ctx, task.ID, TaskDone, text, ""); err != nil {
-		return Result{Text: text, Steps: steps}, fmt.Errorf("task %s: save status: %w", task.ID, err)
-	}
-	return Result{Text: text, Steps: steps}, nil
+	return res, nil
+}
+
+// blocked reports whether err stops a task because of its environment, not
+// the task: it needs a human, and the task waits instead of failing.
+func blocked(err error) bool {
+	return errors.Is(err, ErrToolsChanged) || errors.Is(err, ErrServerDown) || errors.Is(err, ErrOutcomeUnknown)
 }
 
 // taskRun is the state of one Run.
