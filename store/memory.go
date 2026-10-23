@@ -27,10 +27,13 @@ func NewMemory() runner.Store {
 	return &Memory{store: map[string][]runner.Step{}, specs: map[string][]byte{}}
 }
 
-// StartTask implements runner.Store: a resumed task must match its first run.
+// StartTask implements runner.Store: a resumed task must match its first run,
+// except for the model and thinking, which are saved.
 func (ss *Memory) StartTask(ctx context.Context, task runner.Task) error {
 	if saved, ok := ss.specs[task.ID]; ok {
-		return checkSame(saved, task)
+		if err := checkSame(saved, task); err != nil {
+			return err
+		}
 	}
 	spec, err := json.Marshal(task)
 	if err != nil {

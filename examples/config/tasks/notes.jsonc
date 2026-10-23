@@ -2,7 +2,8 @@
 // (or by path: keel run examples/config/tasks/notes.jsonc). It needs notes.txt
 // in the fs server's folder (~/.keel/demo in config/keel.jsonc). Running it
 // again after a crash resumes it; the settings below must stay the same, or
-// keel stops with an error. model, thinking, system and max_steps may be left
+// keel stops with an error. Only model and thinking may change, e.g. to
+// continue with another provider when one is down. model, thinking, system and max_steps may be left
 // out; they then come from "defaults" in the keel config.
 {
   // The task ID; keel run --id overrides it.
@@ -15,6 +16,8 @@
   "model": "anthropic:claude-haiku-4-5-20251001",
 
   // Anthropic: adaptive thinking; Ollama: think mode; OpenAI: ignored.
+  // Back on Anthropic after another provider's tool call, thinking on is
+  // likely rejected; resume with false, then turn it on again.
   "thinking": false,
 
   // The system prompt: how the model should work.

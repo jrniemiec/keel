@@ -74,7 +74,8 @@ type Runner struct {
 }
 
 // Task represents a task to be executed by the Runner. The Store saves it on
-// the first run; a resume must bring the same settings (ErrTaskChanged).
+// the first run; a resume must bring the same settings (ErrTaskChanged),
+// except Model and Thinking, which may change between runs.
 type Task struct {
 	ID           string
 	Goal         string   // instructions for the model
@@ -108,6 +109,7 @@ type Message struct {
 	RawFrom   string          // the provider that produced Raw, e.g. "anthropic"
 	TokensIn  int             // input tokens the reply cost, retries included
 	TokensOut int             // output tokens, thinking included
+	Model     string          // the Task.Model that gave the reply; set by the Runner
 }
 
 // Stop reasons in Message.Stop.
@@ -446,6 +448,9 @@ func (r *Runner) start(ctx context.Context, task Task, history []Step, tools []T
 		log.Info(klog.MsgTaskStart, "model", task.Model, "max_steps", task.MaxSteps, "tools", len(tools))
 	} else {
 		log.Info(klog.MsgTaskResume, "model", task.Model, "steps", t.seq, "model_calls", t.steps)
+		if t.last != nil && t.last.Model != "" && t.last.Model != task.Model {
+			log.Info(klog.MsgModelChanged, "from", t.last.Model, "to", task.Model)
+		}
 	}
 	return t, nil
 }
@@ -508,6 +513,7 @@ func (t *taskRun) ask(ctx context.Context) (Message, error) {
 	if err != nil {
 		return Message{}, fmt.Errorf("step %d: ask model: %w", t.steps, err)
 	}
+	reply.Model = t.task.Model
 	if err := t.save(ctx, Step{Kind: ModelReply, Msg: reply}); err != nil {
 		return Message{}, fmt.Errorf("save reply: %w", err)
 	}

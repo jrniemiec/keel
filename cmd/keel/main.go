@@ -37,9 +37,10 @@ Usage:
 
 Commands:
   run    Run a task, or resume it from its last saved step after a crash
-         or Ctrl-C. A done task prints its saved answer. The task's
-         settings must not change between runs; for new settings, start
-         a new task (another name, or --id). <task> is a task name, read
+         or Ctrl-C. A done task prints its saved answer. Between runs
+         only model and thinking may change (e.g. another provider when
+         one is down); for other new settings, start a new task (another
+         name, or --id). <task> is a task name, read
          from $KEEL_HOME/config/tasks/<task>.jsonc, or the path of a task
          config (it has a "/" or ends in .jsonc).
 

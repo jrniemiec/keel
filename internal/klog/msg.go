@@ -9,12 +9,13 @@ const (
 	MsgCrash   = "debug crash" // keel run --crash-at exits the process
 
 	// a task (runner); entries carry task=<id>
-	MsgTaskStart   = "task start"
-	MsgTaskResume  = "task resume"
-	MsgTaskDone    = "task done"
-	MsgTaskFailed  = "task failed"
-	MsgTaskStopped = "task stopped" // ctx cancelled; stays running, resumed later
-	MsgTaskBlocked = "task blocked" // stopped by its environment (tools changed, server down); not failed
+	MsgTaskStart    = "task start"
+	MsgTaskResume   = "task resume"
+	MsgModelChanged = "model changed" // resumed with another model than the last reply's
+	MsgTaskDone     = "task done"
+	MsgTaskFailed   = "task failed"
+	MsgTaskStopped  = "task stopped" // ctx cancelled; stays running, resumed later
+	MsgTaskBlocked  = "task blocked" // stopped by its environment (tools changed, server down); not failed
 
 	// a step; entries also carry seq and kind
 	MsgModelReply  = "model reply"

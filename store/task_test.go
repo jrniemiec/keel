@@ -31,17 +31,49 @@ func TestStartTaskChanged(t *testing.T) {
 				t.Fatalf("resume with the same settings: %v", err)
 			}
 
+			switched := task
+			switched.Model = "anthropic:m"
+			switched.Thinking = true
+			if err := st.StartTask(ctx, switched); err != nil {
+				t.Fatalf("resume with another model: %v", err)
+			}
+
 			changed := task
-			changed.Model = "anthropic:m"
-			changed.Thinking = true
+			changed.Goal = "g2"
+			changed.MaxSteps = 6
 			err := st.StartTask(ctx, changed)
 			if !errors.Is(err, runner.ErrTaskChanged) {
 				t.Fatalf("err = %v, want ErrTaskChanged", err)
 			}
-			if !strings.Contains(err.Error(), "Model, Thinking") {
-				t.Errorf("err = %v, want it to name Model and Thinking", err)
+			if !strings.Contains(err.Error(), "Goal, MaxSteps") {
+				t.Errorf("err = %v, want it to name Goal and MaxSteps", err)
 			}
 		})
+	}
+}
+
+func TestStartTaskSavesSwitchedModel(t *testing.T) {
+	db, err := OpenSQLite(filepath.Join(t.TempDir(), "keel.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	ctx := context.Background()
+	task := runner.Task{ID: "t1", Goal: "g", Model: "anthropic:m", MaxSteps: 5}
+	if err := db.StartTask(ctx, task); err != nil {
+		t.Fatal(err)
+	}
+	task.Model = "openai:m"
+	if err := db.StartTask(ctx, task); err != nil {
+		t.Fatal(err)
+	}
+	tasks, err := db.Tasks(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(tasks) != 1 || tasks[0].Model != "openai:m" {
+		t.Errorf("tasks = %+v, want model openai:m", tasks)
 	}
 }
 

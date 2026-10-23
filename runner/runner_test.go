@@ -201,6 +201,31 @@ func TestRunComparesToolSnapshot(t *testing.T) {
 	}
 }
 
+func TestRunRecordsModel(t *testing.T) {
+	call := ToolCall{ID: "c1", Name: "fs__read_file"}
+	store := &memStore{steps: []Step{
+		{Kind: ToolSnapshot, Tools: []ToolDef{{Name: "fs__read_file"}}},
+		{Kind: ModelReply, Msg: Message{Role: "assistant", ToolCalls: []ToolCall{call}, Stop: StopToolUse, Model: "anthropic:m"}},
+		{Kind: Intent, CallID: "c1"},
+		{Kind: ToolResult, CallID: "c1", Msg: Message{Role: "tool", ToolCallID: "c1", Text: "x"}},
+	}}
+	var logged bytes.Buffer
+	r := &Runner{Model: &endModel{}, Tools: listTools{{Name: "fs__read_file"}}, Store: store, Logger: klog.New(&logged, klog.LevelInfo)}
+
+	task := newTask("fs__read_file")
+	task.Model = "openai:m"
+	if _, err := r.Run(context.Background(), task); err != nil {
+		t.Fatal(err)
+	}
+	last := store.steps[len(store.steps)-1]
+	if last.Kind != ModelReply || last.Msg.Model != "openai:m" {
+		t.Errorf("last step = %+v, want a reply from openai:m", last)
+	}
+	if !strings.Contains(logged.String(), `msg="model changed" task=t1 from=anthropic:m to=openai:m`) {
+		t.Errorf("model change not logged; log:\n%s", logged.String())
+	}
+}
+
 func TestRunDoneTaskIgnoresToolChanges(t *testing.T) {
 	read := ToolDef{Name: "fs__read_file", Description: "Read a file"}
 	store := &memStore{steps: []Step{

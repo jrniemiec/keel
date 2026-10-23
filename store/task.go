@@ -9,8 +9,12 @@ import (
 	"github.com/jrniemiec/keel/runner"
 )
 
+// switchable are the Task fields a resume may change: a task can continue
+// with another model, e.g. when its provider is down.
+var switchable = map[string]bool{"Model": true, "Thinking": true}
+
 // checkSame returns runner.ErrTaskChanged, naming the fields that differ,
-// when task doesn't match the spec saved on the task's first run.
+// when task doesn't match the saved spec; switchable fields are not compared.
 func checkSame(saved []byte, task runner.Task) error {
 	var old runner.Task
 	if err := json.Unmarshal(saved, &old); err != nil {
@@ -19,6 +23,9 @@ func checkSame(saved []byte, task runner.Task) error {
 	var diff []string
 	ov, nv := reflect.ValueOf(old), reflect.ValueOf(task)
 	for i := range ov.NumField() {
+		if switchable[ov.Type().Field(i).Name] {
+			continue
+		}
 		o, n := ov.Field(i), nv.Field(i)
 		if o.Kind() == reflect.Slice && o.Len() == 0 && n.Len() == 0 {
 			continue // nil and empty are the same here
