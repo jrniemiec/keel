@@ -37,46 +37,81 @@ type Server struct {
 	Env     []string // "KEY=value", added to keel's environment
 }
 
-// Host holds a session with each started server.
+// Host holds a session with each started server. All maps are by server
+// name. It is used by one goroutine at a time.
 type Host struct {
-	sessions map[string]*mcp.ClientSession // by server name
-	stderr   map[string]*stderrLog         // each server's stderr, by server name
-	maxOut   int                           // bytes of one tool result kept
+	client    *mcp.Client
+	servers   map[string]Server             // how to start each server, also for a restart
+	sessions  map[string]*mcp.ClientSession // none while a server is down and not restarted
+	stderr    map[string]*stderrLog         // each session's stderr
+	down      map[string]bool               // died; restarted before the next call
+	restarted map[string]bool               // restarted once; a second death is final
+	maxOut    int                           // bytes of one tool result kept
 }
 
 // Start starts the servers and connects to them. maxOut caps the text of one
 // tool result, so a large file read can't fill the model's context. On error,
 // the servers already started are closed.
 func Start(ctx context.Context, servers []Server, maxOut int) (*Host, error) {
-	h := &Host{sessions: map[string]*mcp.ClientSession{}, stderr: map[string]*stderrLog{}, maxOut: maxOut}
-	client := mcp.NewClient(&mcp.Implementation{Name: "keel", Version: "dev"}, nil)
+	h := &Host{
+		client:    mcp.NewClient(&mcp.Implementation{Name: "keel", Version: "dev"}, nil),
+		servers:   map[string]Server{},
+		sessions:  map[string]*mcp.ClientSession{},
+		stderr:    map[string]*stderrLog{},
+		down:      map[string]bool{},
+		restarted: map[string]bool{},
+		maxOut:    maxOut,
+	}
 	for _, s := range servers {
 		if !validName.MatchString(s.Name) || strings.Contains(s.Name, Sep) {
 			h.Close()
 			return nil, fmt.Errorf("mcp server name %q: want letters, digits, '-' or '_', no %q", s.Name, Sep)
 		}
-		if _, dup := h.sessions[s.Name]; dup {
+		if _, dup := h.servers[s.Name]; dup {
 			h.Close()
 			return nil, fmt.Errorf("mcp server %q listed twice", s.Name)
 		}
-		cmd := exec.Command(s.Command, s.Args...)
-		cmd.Env = append(os.Environ(), s.Env...)
-		// CommandTransport takes stdin and stdout and leaves Stderr as set
-		// here; exec copies the server's stderr into it.
-		stderr := &stderrLog{server: s.Name}
-		cmd.Stderr = stderr
-		h.stderr[s.Name] = stderr
-		cs, err := client.Connect(ctx, &mcp.CommandTransport{Command: cmd}, nil)
-		if err != nil {
+		h.servers[s.Name] = s
+		if err := h.connect(ctx, s); err != nil {
 			h.Close()
-			stderr.flush() // why the server failed to start, if it said so
 			return nil, fmt.Errorf("start mcp server %s: %w", s.Name, err)
 		}
-		h.sessions[s.Name] = cs
-		info := cs.InitializeResult().ServerInfo
-		klog.Info(klog.MsgMCPUp, "server", s.Name, "name", info.Name, "version", info.Version)
 	}
 	return h, nil
+}
+
+// connect starts server s and connects to it.
+func (h *Host) connect(ctx context.Context, s Server) error {
+	cmd := exec.Command(s.Command, s.Args...)
+	cmd.Env = append(os.Environ(), s.Env...)
+	// CommandTransport takes stdin and stdout and leaves Stderr as set
+	// here; exec copies the server's stderr into it.
+	stderr := &stderrLog{server: s.Name}
+	cmd.Stderr = stderr
+	cs, err := h.client.Connect(ctx, &mcp.CommandTransport{Command: cmd}, nil)
+	if err != nil {
+		stderr.flush() // why the server failed to start, if it said so
+		return err
+	}
+	h.sessions[s.Name], h.stderr[s.Name] = cs, stderr
+	info := cs.InitializeResult().ServerInfo
+	klog.Info(klog.MsgMCPUp, "server", s.Name, "name", info.Name, "version", info.Version)
+	return nil
+}
+
+// restart starts server name again after it died, once per Host.
+func (h *Host) restart(ctx context.Context, name string) error {
+	if h.restarted[name] {
+		return fmt.Errorf("mcp server %s: %w: restarted once already", name, runner.ErrServerDown)
+	}
+	h.restarted[name] = true
+	klog.Warn(klog.MsgMCPRestart, "server", name)
+	h.closeSession(name) // reaps the dead process and flushes its stderr
+	if err := h.connect(ctx, h.servers[name]); err != nil {
+		return fmt.Errorf("restart mcp server %s: %w: %w", name, runner.ErrServerDown, err)
+	}
+	h.down[name] = false
+	return nil
 }
 
 // List returns the tools of all servers, with prefixed names, in server name
@@ -128,13 +163,19 @@ func hints(a *mcp.ToolAnnotations) runner.Hints {
 // Call runs a tool on its server. A failure the server reports (the tool's
 // isError, or a JSON-RPC error such as an unknown tool or bad arguments) is
 // returned as isError, for the model. err means the server couldn't be
-// reached, e.g. its process died.
+// reached; it wraps runner.ErrServerDown when the server died, and the next
+// Call to that server restarts it, once.
 func (h *Host) Call(ctx context.Context, call runner.ToolCall) (string, bool, error) {
 	server, tool, _ := strings.Cut(call.Name, Sep)
-	cs, ok := h.sessions[server]
-	if !ok {
+	if _, ok := h.servers[server]; !ok {
 		return fmt.Sprintf("unknown tool %s", call.Name), true, nil
 	}
+	if h.down[server] {
+		if err := h.restart(ctx, server); err != nil {
+			return "", false, err
+		}
+	}
+	cs := h.sessions[server]
 	params := &mcp.CallToolParams{Name: tool}
 	if len(call.Args) > 0 {
 		params.Arguments = call.Args
@@ -145,7 +186,14 @@ func (h *Host) Call(ctx context.Context, call runner.ToolCall) (string, bool, er
 		if errors.As(err, &rpcErr) {
 			return rpcErr.Message, true, nil
 		}
-		return "", false, fmt.Errorf("mcp server %s: %w", server, err)
+		if ctx.Err() != nil {
+			return "", false, fmt.Errorf("mcp server %s: %w", server, err)
+		}
+		// Any other error: the server is unreachable, and whether the call
+		// ran is unknown (go-sdk doesn't tell "never sent" from "died").
+		h.down[server] = true
+		klog.Warn(klog.MsgMCPDown, "server", server, "tool", tool, "err", err)
+		return "", false, fmt.Errorf("mcp server %s: %w: %w", server, runner.ErrServerDown, err)
 	}
 	return text(res, h.maxOut), res.IsError, nil
 }
@@ -195,16 +243,28 @@ func text(res *mcp.CallToolResult, maxOut int) string {
 // stopped if it doesn't exit. Then a last stderr line without '\n' is logged.
 func (h *Host) Close() error {
 	var errs []error
-	for name, cs := range h.sessions {
-		if err := cs.Close(); err != nil {
+	for name := range h.sessions {
+		if err := h.closeSession(name); err != nil && !h.down[name] { // a dead one fails to close
 			errs = append(errs, fmt.Errorf("close mcp server %s: %w", name, err))
-		}
-		delete(h.sessions, name)
-		if stderr := h.stderr[name]; stderr != nil {
-			stderr.flush() // the process has exited (cmd.Wait): no more writes
 		}
 	}
 	return errors.Join(errs...)
+}
+
+// closeSession ends server name's session, waits for its process, and logs
+// a last stderr line without '\n'.
+func (h *Host) closeSession(name string) error {
+	cs, ok := h.sessions[name]
+	if !ok {
+		return nil
+	}
+	err := cs.Close()
+	delete(h.sessions, name)
+	if stderr := h.stderr[name]; stderr != nil {
+		stderr.flush() // the process has exited (cmd.Wait): no more writes
+		delete(h.stderr, name)
+	}
+	return err
 }
 
 // maxStderrLine is the bytes of one stderr line kept in the log.

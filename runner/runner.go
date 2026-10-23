@@ -48,9 +48,15 @@ type Tools interface {
 	List(ctx context.Context) ([]ToolDef, error)
 	// Call runs a tool. isError means the tool ran and failed; out is the
 	// error text and the model sees it. err means the tool couldn't be
-	// called (e.g. its server died); the task fails.
+	// called; the task fails, unless err wraps ErrServerDown.
 	Call(ctx context.Context, tool ToolCall) (out string, isError bool, err error)
 }
+
+// ErrServerDown is wrapped by a Tools.Call error when the tool's server died:
+// the call's outcome is unknown. The next Call to that server restarts it,
+// once per run. Run retries the call only for a read-only or idempotent tool;
+// otherwise the run stops and the task stays running.
+var ErrServerDown = errors.New("tool server down")
 
 // Runner runs tasks: it drives the loop between the model and the tools.
 type Runner struct {
@@ -224,6 +230,10 @@ func (r *Runner) Run(ctx context.Context, task Task) (Result, error) {
 	if err != nil {
 		if ctx.Err() != nil {
 			log.Warn(klog.MsgTaskStopped, "model_calls", steps, "dur", since(began), "err", err)
+			return Result{Steps: steps}, fmt.Errorf("task %s: %w", task.ID, err)
+		}
+		if errors.Is(err, ErrServerDown) { // the environment, not the task: stays running
+			log.Error(klog.MsgTaskBlocked, "model_calls", steps, "dur", since(began), "err", err)
 			return Result{Steps: steps}, fmt.Errorf("task %s: %w", task.ID, err)
 		}
 		log.Error(klog.MsgTaskFailed, "model_calls", steps, "dur", since(began), "err", err)
@@ -530,6 +540,10 @@ func (t *taskRun) callTool(ctx context.Context, call ToolCall) (out string, fail
 	t.log.Info(klog.MsgToolCall, "seq", t.seq, "kind", Intent, "tool", call.Name, "call_id", call.ID)
 	t.log.Debug(klog.MsgToolArgs, "seq", t.seq, "args", string(call.Args))
 	out, failed, err = t.r.Tools.Call(ctx, call)
+	if errors.Is(err, ErrServerDown) && ctx.Err() == nil && t.safeToRepeat(call.Name) {
+		t.log.Warn(klog.MsgToolRetry, "tool", call.Name, "call_id", call.ID, "err", err)
+		out, failed, err = t.r.Tools.Call(ctx, call) // restarts the server
+	}
 	if err != nil {
 		if ctx.Err() != nil {
 			return "", false, fmt.Errorf("call %s interrupted: %w", call.Name, ctx.Err())
@@ -537,6 +551,13 @@ func (t *taskRun) callTool(ctx context.Context, call ToolCall) (out string, fail
 		return "", false, fmt.Errorf("call %s: %w", call.Name, err)
 	}
 	return out, failed, nil
+}
+
+// safeToRepeat reports whether the task's tool name is read-only or
+// idempotent, by the hints in the task's tools (its snapshot).
+func (t *taskRun) safeToRepeat(name string) bool {
+	i := slices.IndexFunc(t.tools, func(d ToolDef) bool { return d.Name == name })
+	return i >= 0 && (t.tools[i].Hints.ReadOnly || t.tools[i].Hints.Idempotent)
 }
 
 // replay rebuilds the conversation from the steps saved by earlier runs.

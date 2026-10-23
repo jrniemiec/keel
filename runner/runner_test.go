@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"slices"
 	"strings"
 	"testing"
@@ -53,10 +54,11 @@ func (l listTools) Call(ctx context.Context, call ToolCall) (string, bool, error
 	panic("not called")
 }
 
-// memStore keeps steps in memory and records StartTask.
+// memStore keeps steps in memory and records StartTask and FinishTask.
 type memStore struct {
-	steps   []Step
-	started bool
+	steps    []Step
+	started  bool
+	finished string // the status FinishTask got; "" = not called
 }
 
 func (s *memStore) StartTask(ctx context.Context, task Task) error {
@@ -72,6 +74,7 @@ func (s *memStore) Load(ctx context.Context, taskID string) ([]Step, error) {
 }
 func (s *memStore) SetCurrent(ctx context.Context, taskID, current string) error { return nil }
 func (s *memStore) FinishTask(ctx context.Context, taskID, status, result, errText string) error {
+	s.finished = status
 	return nil
 }
 
@@ -218,5 +221,77 @@ func TestRunSavesSnapshotForOldTask(t *testing.T) {
 	}
 	if snapshot := lastToolSnapshot(store.steps); len(snapshot) != 1 {
 		t.Errorf("snapshot = %v, want fs__read_file", snapshot)
+	}
+}
+
+// downTools is a Tools whose server is down for the first downs calls.
+type downTools struct {
+	listed []ToolDef
+	downs  int
+	calls  int
+}
+
+func (d *downTools) List(ctx context.Context) ([]ToolDef, error) { return d.listed, nil }
+func (d *downTools) Call(ctx context.Context, call ToolCall) (string, bool, error) {
+	d.calls++
+	if d.calls <= d.downs {
+		return "", false, fmt.Errorf("mcp server fs: %w: EOF", ErrServerDown)
+	}
+	return "ok", false, nil
+}
+
+// callModel is a Model that calls tool once, then ends the task.
+type callModel struct{ tool string }
+
+func (m callModel) Ask(ctx context.Context, model string, msgs []Message, tools []ToolDef) (Message, error) {
+	if len(msgs) == 1 {
+		return Message{Role: "assistant", ToolCalls: []ToolCall{{ID: "c1", Name: m.tool, Args: json.RawMessage(`{}`)}}, Stop: StopToolUse}, nil
+	}
+	return Message{Role: "assistant", Text: "done", Stop: StopEnd}, nil
+}
+
+func TestRunServerDown(t *testing.T) {
+	listed := []ToolDef{
+		{Name: "fs__read_file", Hints: Hints{ReadOnly: true}},
+		{Name: "fs__write_file", Hints: Hints{Destructive: true}},
+	}
+	tests := []struct {
+		name      string
+		tool      string
+		downs     int
+		wantCalls int
+		wantDone  bool // else blocked: not finished, intent without a result
+	}{
+		{"read-only retried", "fs__read_file", 1, 2, true},
+		{"read-only down twice", "fs__read_file", 2, 2, false},
+		{"write not retried", "fs__write_file", 1, 1, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			store := &memStore{}
+			tools := &downTools{listed: listed, downs: tt.downs}
+			r := &Runner{Model: callModel{tool: tt.tool}, Tools: tools, Store: store}
+
+			res, err := r.Run(context.Background(), newTask("fs__*"))
+			if tools.calls != tt.wantCalls {
+				t.Errorf("calls = %d, want %d", tools.calls, tt.wantCalls)
+			}
+			if tt.wantDone {
+				if err != nil || res.Text != "done" || store.finished != TaskDone {
+					t.Errorf("Run = %q, %v, finished %q; want done", res.Text, err, store.finished)
+				}
+				return
+			}
+			if !errors.Is(err, ErrServerDown) {
+				t.Errorf("err = %v, want ErrServerDown", err)
+			}
+			if store.finished != "" {
+				t.Errorf("FinishTask(%q) called; want the task left running", store.finished)
+			}
+			last := store.steps[len(store.steps)-1]
+			if last.Kind != Intent || last.CallID != "c1" {
+				t.Errorf("last step = %s %s, want the intent without a result", last.Kind, last.CallID)
+			}
+		})
 	}
 }
