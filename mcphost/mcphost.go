@@ -25,10 +25,6 @@ import (
 // Sep joins a server's name and its tool's name.
 const Sep = "__"
 
-// MaxOut caps the text of one tool result, so a large file read can't fill
-// the model's context.
-const MaxOut = 64 << 10
-
 // validName is what Anthropic and OpenAI accept as a tool name.
 var validName = regexp.MustCompile(`^[a-zA-Z0-9_-]{1,64}$`)
 
@@ -43,12 +39,14 @@ type Server struct {
 // Host holds a session with each started server.
 type Host struct {
 	sessions map[string]*mcp.ClientSession // by server name
+	maxOut   int                           // bytes of one tool result kept
 }
 
-// Start starts the servers and connects to them. On error, the servers
-// already started are closed.
-func Start(ctx context.Context, servers []Server) (*Host, error) {
-	h := &Host{sessions: map[string]*mcp.ClientSession{}}
+// Start starts the servers and connects to them. maxOut caps the text of one
+// tool result, so a large file read can't fill the model's context. On error,
+// the servers already started are closed.
+func Start(ctx context.Context, servers []Server, maxOut int) (*Host, error) {
+	h := &Host{sessions: map[string]*mcp.ClientSession{}, maxOut: maxOut}
 	client := mcp.NewClient(&mcp.Implementation{Name: "keel", Version: "dev"}, nil)
 	for _, s := range servers {
 		if !validName.MatchString(s.Name) || strings.Contains(s.Name, Sep) {
@@ -141,13 +139,14 @@ func (h *Host) Call(ctx context.Context, call runner.ToolCall) (string, bool, er
 		}
 		return "", false, fmt.Errorf("mcp server %s: %w", server, err)
 	}
-	return text(res), res.IsError, nil
+	return text(res, h.maxOut), res.IsError, nil
 }
 
 // text joins a result's content into the text the model sees. Text is kept;
 // other content is described in brackets. Structured content is used only
-// when there is no text, since servers should send it as text too.
-func text(res *mcp.CallToolResult) string {
+// when there is no text, since servers should send it as text too. Text
+// longer than maxOut bytes is cut.
+func text(res *mcp.CallToolResult, maxOut int) string {
 	var parts []string
 	hasText := false
 	for _, c := range res.Content {
@@ -178,8 +177,8 @@ func text(res *mcp.CallToolResult) string {
 		}
 	}
 	out := strings.Join(parts, "\n")
-	if len(out) > MaxOut {
-		out = out[:MaxOut] + fmt.Sprintf("\n[cut: %d of %d bytes shown]", MaxOut, len(out))
+	if len(out) > maxOut {
+		out = out[:maxOut] + fmt.Sprintf("\n[cut: %d of %d bytes shown]", maxOut, len(out))
 	}
 	return out
 }

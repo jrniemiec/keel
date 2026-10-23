@@ -38,7 +38,8 @@ func OpenSQLite(path string) (*SQLite, error) {
 func (sl *SQLite) Close() error { return sl.conn.Close() }
 
 // StartTask implements runner.Store: it adds the task's row, or on resume
-// marks it running again. The spec of a resumed task is kept as first saved.
+// marks it running again. The spec of a resumed task is kept as first saved;
+// task must match it, else runner.ErrTaskChanged.
 func (sl *SQLite) StartTask(ctx context.Context, task runner.Task) error {
 	spec, err := json.Marshal(task)
 	if err != nil {
@@ -47,6 +48,23 @@ func (sl *SQLite) StartTask(ctx context.Context, task runner.Task) error {
 
 	sl.mu.Lock()
 	defer sl.mu.Unlock()
+
+	var saved []byte
+	err = sqlitex.Execute(sl.conn, `SELECT spec FROM tasks WHERE id = ?`, &sqlitex.ExecOptions{
+		Args: []any{task.ID},
+		ResultFunc: func(stmt *sqlite.Stmt) error {
+			saved = []byte(stmt.ColumnText(0))
+			return nil
+		},
+	})
+	if err != nil {
+		return fmt.Errorf("load task: %w", err)
+	}
+	if saved != nil {
+		if err := checkSame(saved, task); err != nil {
+			return err
+		}
+	}
 
 	at := now()
 	err = sqlitex.Execute(sl.conn, `

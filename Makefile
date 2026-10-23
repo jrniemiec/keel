@@ -5,7 +5,7 @@ BINDIR   ?= $(HOME)/dev/bin
 INSTALL  := $(BINDIR)/$(BINARY)
 LDFLAGS  ?= -X main.version=$(VERSION)
 
-.PHONY: build install run test fmt vet lint clean dist release
+.PHONY: build install config run test fmt vet lint clean dist release
 
 build:
 	@mkdir -p bin
@@ -17,6 +17,11 @@ install: test build
 	ln -sf $(CURDIR)/bin/$(BINARY) $(INSTALL)
 	ln -sf $(CURDIR)/bin/kstat $(BINDIR)/kstat
 	@echo "Installed: $(INSTALL), $(BINDIR)/kstat"
+
+config: ## Copy local/config to ~/.keel/config, for experimenting with settings (overwrites)
+	@test -d local/config || { echo "no local/config; start with: cp -R examples/config local/"; exit 1; }
+	@mkdir -p $(HOME)/.keel/config
+	cp -R local/config/. $(HOME)/.keel/config/
 
 run: build
 	bin/$(BINARY)

@@ -6,7 +6,7 @@ package klog
 const (
 	// keel itself
 	MsgStarted = "keel started"
-	MsgCrash   = "demo crash" // cmd/demo: -crash-at exits the process
+	MsgCrash   = "debug crash" // keel run --crash-at exits the process
 
 	// a task (runner); entries carry task=<id>
 	MsgTaskStart   = "task start"

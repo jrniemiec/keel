@@ -1,0 +1,71 @@
+// The keel config, ~/.keel/config/keel.jsonc ($KEEL_HOME/config/keel.jsonc).
+// Install the examples with cp -r examples/config ~/.keel/ and adjust the paths.
+// It is set up once per machine and shared by all tasks. A task may use only
+// the servers named here. Every value below is keel's default, except
+// servers; a key left out keeps its default.
+{
+  // SQLite database with every task's step log.
+  "db": "~/.keel/data/keel.db",
+
+  // Progress log, appended; follow it with tail -f.
+  "log_file": "~/.keel/keel.log",
+
+  // Lowest level written to the log file: debug, info, warn or error. debug
+  // adds the model's text and each tool's input and output. keel run -l
+  // overrides it.
+  "log_level": "info",
+
+  // The log file is rotated at this size (MB); this many old files are kept.
+  "log_max_mb": 50,
+  "log_backups": 2,
+
+  // Bytes of one tool result the model sees; the rest is cut, so a large
+  // file read can't fill the model's context.
+  "max_tool_output": 65536,
+
+  // Values a task config gets for the keys it leaves out.
+  "defaults": {
+    // provider:model; the provider is anthropic, openai or ollama.
+    "model": "anthropic:claude-haiku-4-5-20251001",
+
+    // Anthropic: adaptive thinking; Ollama: think mode; OpenAI: ignored.
+    "thinking": false,
+
+    // The system prompt: how the model should work. The goal is separate.
+    "system": "You are running a task with tools. Use the tools to do the work. When the task is done, reply with a short summary.",
+
+    // Model calls before the task fails with "step limit reached".
+    "max_steps": 20,
+  },
+
+  // MCP servers, started over stdio. A tool is named <server>__<tool>,
+  // e.g. fs__read_file. env adds variables to the server's environment.
+  "servers": {
+    // github.com/mark3labs/mcp-filesystem-server; it may access only the
+    // folders given as args.
+    "fs": {
+      "command": "~/go/bin/mcp-filesystem-server",
+      "args": ["~/.keel/demo"],
+      "env": {},
+    },
+  },
+
+  // Provider settings. API keys are never in this file: keel reads
+  // ANTHROPIC_API_KEY or OPENAI_API_KEY from the environment
+  // (KEEL_ANTHROPIC_API_KEY or KEEL_OPENAI_API_KEY win if set). OpenAI has
+  // no settings here.
+  "providers": {
+    "anthropic": {
+      // Output tokens per reply, thinking included. A reply cut off at this
+      // limit is asked again once with double the limit.
+      "max_output_tokens": 16000,
+
+      // How long to wait for a reply ("90s", "10m"). Replies aren't
+      // streamed, so nothing arrives until the reply is complete.
+      "timeout": "10m",
+    },
+    "ollama": {
+      "host": "http://localhost:11434",
+    },
+  },
+}

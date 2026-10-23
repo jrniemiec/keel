@@ -13,8 +13,8 @@ Makefile.local
 # Go workspace
 go.work
 go.work.sum
-#keel sym link
-keel
+# keel symlink in the repo root only (not cmd/keel)
+/keel
 
 # IDE / editor
 .vscode/

@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"encoding/json"
 	"slices"
 
 	"github.com/jrniemiec/keel/runner"
@@ -9,6 +10,7 @@ import (
 
 type Memory struct {
 	store map[string][]runner.Step
+	specs map[string][]byte // each task as first started, as JSON
 }
 
 func (ss *Memory) Append(ctx context.Context, taskID string, s runner.Step) error {
@@ -22,12 +24,24 @@ func (ss *Memory) Load(ctx context.Context, taskID string) ([]runner.Step, error
 
 func NewMemory() runner.Store {
 
-	return &Memory{store: map[string][]runner.Step{}}
+	return &Memory{store: map[string][]runner.Step{}, specs: map[string][]byte{}}
+}
+
+// StartTask implements runner.Store: a resumed task must match its first run.
+func (ss *Memory) StartTask(ctx context.Context, task runner.Task) error {
+	if saved, ok := ss.specs[task.ID]; ok {
+		return checkSame(saved, task)
+	}
+	spec, err := json.Marshal(task)
+	if err != nil {
+		return err
+	}
+	ss.specs[task.ID] = spec
+	return nil
 }
 
 // Memory keeps no task summaries; these do nothing.
 
-func (ss *Memory) StartTask(ctx context.Context, task runner.Task) error { return nil }
 func (ss *Memory) SetCurrent(ctx context.Context, taskID, current string) error {
 	return nil
 }

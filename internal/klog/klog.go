@@ -17,8 +17,6 @@ import (
 	"gopkg.in/natefinch/lumberjack.v2"
 )
 
-const maxSizeMB = 50
-
 // Level is a log level.
 type Level = slog.Level
 
@@ -78,14 +76,15 @@ func ParseLevel(s string) (Level, bool) {
 	}
 }
 
-// Init opens path for append with automatic rotation and sets it as the slog
-// default handler at lvl. When verb is true, a second handler also writes
-// everything, debug included, to stderr; the file keeps lvl.
-func Init(path string, lvl Level, verb bool) {
+// Init opens path for append, rotated at maxMB megabytes with backups old
+// files kept, and sets it as the slog default handler at lvl. When verb is
+// true, a second handler also writes everything, debug included, to stderr;
+// the file keeps lvl.
+func Init(path string, lvl Level, verb bool, maxMB, backups int) {
 	if writer != nil {
 		_ = writer.Close()
 	}
-	writer = &lumberjack.Logger{Filename: path, MaxSize: maxSizeMB, MaxBackups: 2}
+	writer = &lumberjack.Logger{Filename: path, MaxSize: maxMB, MaxBackups: backups}
 	level.Set(lvl)
 	verbose = verb
 

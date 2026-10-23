@@ -56,13 +56,19 @@ type Runner struct {
 	Logger *klog.Logger // progress log; nil = klog.Default()
 }
 
-// Task represents a task to be executed by the Runner.
+// Task represents a task to be executed by the Runner. The Store saves it on
+// the first run; a resume must bring the same settings (ErrTaskChanged).
 type Task struct {
 	ID           string
 	Goal         string   // instructions for the model
 	AllowedTools []string // tools by name
-	Model        string   // e.g. "claude-sonnet-5"
+	Model        string   // e.g. "anthropic:claude-sonnet-5"
 	MaxSteps     int
+
+	// Not used by the runner: the Model is set up with them (one task per
+	// process for now). Saved here so a resume checks them too.
+	System   string // system prompt
+	Thinking bool
 }
 
 // Model sends the conversation and tool definitions to an LLM and returns its reply.
@@ -101,6 +107,10 @@ var (
 	ErrRefused = errors.New("model refused")
 )
 
+// ErrTaskChanged is returned by Store.StartTask when a resumed task's
+// settings differ from those saved on its first run.
+var ErrTaskChanged = errors.New("task settings differ from its first run")
+
 // Result is the outcome of a finished task.
 type Result struct {
 	Text  string // the model's final answer
@@ -134,7 +144,8 @@ const (
 // Store persists a task's steps so Run can resume after a crash, and a
 // summary of each task (status, counters, what it's doing) for keel status.
 type Store interface {
-	// StartTask records task as running: a new task, or one resumed.
+	// StartTask records task as running: a new task, or one resumed. A
+	// resumed task must have the saved settings, else ErrTaskChanged.
 	StartTask(ctx context.Context, task Task) error
 	// Append saves s and updates the task's summary in one transaction;
 	// durable when it returns.

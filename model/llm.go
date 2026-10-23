@@ -6,19 +6,11 @@ import (
 	"fmt"
 	"strings"
 	"sync"
-	"time"
 
 	"github.com/jrniemiec/llm"
 
 	"github.com/jrniemiec/keel/internal/klog"
 	"github.com/jrniemiec/keel/runner"
-)
-
-// Anthropic defaults, used when the config leaves them at zero. llm sends no
-// output limit to OpenAI and Ollama.
-const (
-	defaultMaxOutput = 16000            // tokens per reply; thinking counts too
-	defaultTimeout   = 10 * time.Minute // a reply isn't streamed, so headers come only when it's complete
 )
 
 // LLM implements runner.Model. Task.Model names the provider and the model as
@@ -43,8 +35,8 @@ type providerKey struct {
 }
 
 // NewLLM returns an LLM. configs holds the settings for each provider name
-// ("anthropic", "openai", "ollama"); a provider without an entry gets the
-// defaults, which is enough for Ollama. system is the system prompt for every
+// ("anthropic", "openai", "ollama"), from the keel config; a provider without
+// an entry gets llm's defaults. system is the system prompt for every
 // request; it may be empty.
 func NewLLM(configs map[string]llm.ProviderConfig, system string) *LLM {
 	return &LLM{
@@ -103,14 +95,6 @@ func (m *LLM) provider(key providerKey) (llm.ToolProvider, error) {
 	cfg := m.configs[kind]
 	cfg.Provider = kind
 	cfg.Model = modelName
-	if kind == "anthropic" {
-		if cfg.MaxOutputTokens <= 0 {
-			cfg.MaxOutputTokens = defaultMaxOutput
-		}
-		if cfg.Timeout <= 0 {
-			cfg.Timeout = defaultTimeout
-		}
-	}
 	if key.larger {
 		cfg.MaxOutputTokens *= 2
 	}

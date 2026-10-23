@@ -53,13 +53,14 @@ func ask(t *testing.T, m *LLM, model string) runner.Message {
 }
 
 func TestAskRetriesCutOffWithLargerLimit(t *testing.T) {
-	m, calls := newFakeLLM(nil, llm.StopMaxTokens, llm.StopEnd)
+	m, calls := newFakeLLM(map[string]llm.ProviderConfig{"anthropic": {MaxOutputTokens: 16000}},
+		llm.StopMaxTokens, llm.StopEnd)
 	reply := ask(t, m, "anthropic:claude-test")
 
 	if reply.Stop != runner.StopEnd {
 		t.Errorf("Stop = %q, want the retry's %q", reply.Stop, runner.StopEnd)
 	}
-	if want := []int{defaultMaxOutput, 2 * defaultMaxOutput}; !slices.Equal(*calls, want) {
+	if want := []int{16000, 32000}; !slices.Equal(*calls, want) {
 		t.Errorf("limits = %v, want %v", *calls, want)
 	}
 }

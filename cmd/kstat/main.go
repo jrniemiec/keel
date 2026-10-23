@@ -4,7 +4,7 @@
 // refreshing.
 //
 //	kstat -w
-//	kstat -db ~/.keel/data/demo.db
+//	kstat -db /tmp/test.db
 package main
 
 import (
@@ -19,6 +19,7 @@ import (
 	"text/tabwriter"
 	"time"
 
+	"github.com/jrniemiec/keel/config"
 	"github.com/jrniemiec/keel/store"
 )
 
@@ -34,7 +35,7 @@ Usage:
 
 Examples:
   kstat -w                            watch all tasks, refreshed every second
-  kstat -db ~/.keel/data/demo.db      the demo's tasks
+  kstat -db /tmp/test.db             tasks in another database
 
 NOTE is what a running task is doing, a failed task's error, or a done
 task's answer.
@@ -100,13 +101,13 @@ func printTasks(w io.Writer, tasks []store.Summary, now time.Time) {
 	tw.Flush()
 }
 
-// defaultDBPath returns ~/.keel/data/keel.db, keel's default.
+// defaultDBPath returns the db in the keel config, as keel run uses it.
 func defaultDBPath() string {
-	home, err := os.UserHomeDir()
+	kc, err := config.LoadKeelConfig("")
 	if err != nil {
-		return "keel.db" // fall back to the current directory
+		return filepath.Join(config.Home(), "data", "keel.db")
 	}
-	return filepath.Join(home, ".keel", "data", "keel.db")
+	return kc.DB
 }
 
 // ago rounds d for display: 4s, 3m, 2h, 5d.

@@ -1,0 +1,33 @@
+// A task config, ~/.keel/config/tasks/notes.jsonc. Run it with: keel run notes
+// (or by path: keel run examples/config/tasks/notes.jsonc). It needs notes.txt
+// in the fs server's folder (~/.keel/demo in config/keel.jsonc). Running it
+// again after a crash resumes it; the settings below must stay the same, or
+// keel stops with an error. model, thinking, system and max_steps may be left
+// out; they then come from "defaults" in the keel config.
+{
+  // The task ID; keel run --id overrides it.
+  "name": "notes",
+
+  // What the model should do; sent as its first message.
+  "goal": "Read notes.txt in the folder you can access, count its words and lines, and write the counts to report-notes.txt in the same folder.",
+
+  // provider:model, e.g. "ollama:qwen3.5:9b" or "openai:gpt-5".
+  "model": "anthropic:claude-haiku-4-5-20251001",
+
+  // Anthropic: adaptive thinking; Ollama: think mode; OpenAI: ignored.
+  "thinking": false,
+
+  // The system prompt: how the model should work.
+  "system": "You are running a task with tools. Use the tools to do the work. When the task is done, reply with a short summary.",
+
+  // Servers from the keel config, and the tools the model may use.
+  "servers": ["fs"],
+  "allow": [
+    "fs__list_allowed_directories",
+    "fs__read_file",
+    "fs__write_file",
+  ],
+
+  // Model calls before the task fails with "step limit reached".
+  "max_steps": 10,
+}
