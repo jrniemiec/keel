@@ -83,10 +83,14 @@ func (sl *SQLite) StartTask(ctx context.Context, task runner.Task) error {
 // Append implements runner.Store. It saves the step and adds it to the
 // task's summary in one transaction.
 func (sl *SQLite) Append(ctx context.Context, taskID string, s runner.Step) (err error) {
-	msg, err := json.Marshal(s.Msg)
+	var msg []byte
+	if s.Kind == runner.ToolSnapshot {
+		msg, err = json.Marshal(s.Tools)
+	} else {
+		msg, err = json.Marshal(s.Msg)
+	}
 	if err != nil {
 		return fmt.Errorf("encode msg: %w", err)
-
 	}
 
 	sl.mu.Lock()
@@ -261,7 +265,11 @@ func (sl *SQLite) Load(ctx context.Context, taskID string) ([]runner.Step, error
 			Kind:   runner.StepKind(stmt.ColumnText(0)),
 			CallID: stmt.ColumnText(1),
 		}
-		if err := json.Unmarshal([]byte(stmt.ColumnText(2)), &s.Msg); err != nil {
+		var dst any = &s.Msg
+		if s.Kind == runner.ToolSnapshot {
+			dst = &s.Tools
+		}
+		if err := json.Unmarshal([]byte(stmt.ColumnText(2)), dst); err != nil {
 			return nil, fmt.Errorf("decode msg: %w", err)
 		}
 		steps = append(steps, s)
@@ -297,7 +305,7 @@ CREATE TABLE IF NOT EXISTS steps (
 	task_id TEXT NOT NULL,
 	kind    TEXT NOT NULL,
 	call_id TEXT,
-	msg     BLOB,
+	msg     BLOB,                -- Message as JSON; []ToolDef for tool_snapshot
 	at      TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS steps_task ON steps(task_id, id);

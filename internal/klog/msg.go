@@ -14,6 +14,7 @@ const (
 	MsgTaskDone    = "task done"
 	MsgTaskFailed  = "task failed"
 	MsgTaskStopped = "task stopped" // ctx cancelled; stays running, resumed later
+	MsgTaskBlocked = "task blocked" // not resumed: tools changed since its snapshot; stays as it was
 
 	// a step; entries also carry seq and kind
 	MsgModelReply  = "model reply"
@@ -21,6 +22,11 @@ const (
 	MsgToolResult  = "tool result"  // WARN when the call failed
 	MsgToolSkipped = "tool skipped" // has a result from before a restart
 	MsgToolDenied  = "tool denied"  // not in the task's allowed tools
+
+	// the task's tools (runner); see local/design-notes.md, "Tool snapshot"
+	MsgToolSnapshot = "tool snapshot" // WARN: saved late, for a task from before snapshots
+	MsgToolRemoved  = "tool removed"  // in the snapshot, no longer listed; dropped
+	MsgToolAdded    = "tool added"    // allowed by a pattern, not in the snapshot; ignored
 
 	// DEBUG payloads
 	MsgModelText = "model text"

@@ -1,12 +1,15 @@
 package runner
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"path"
+	"reflect"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/jrniemiec/keel/internal/klog"
@@ -112,6 +115,11 @@ var (
 // settings differ from those saved on its first run.
 var ErrTaskChanged = errors.New("task settings differ from its first run")
 
+// ErrToolsChanged is returned by Run when a resumed task's tools differ from
+// its tool snapshot: a description, schema or hints changed, or none is left.
+// The task is not started; it stays as it was.
+var ErrToolsChanged = errors.New("tools changed since the task started")
+
 // Result is the outcome of a finished task.
 type Result struct {
 	Text  string // the model's final answer
@@ -125,13 +133,16 @@ const (
 	ModelReply StepKind = "model_reply" // the model's reply
 	Intent     StepKind = "intent"      // about to run a tool call
 	ToolResult StepKind = "tool_result" // the tool call's result
+
+	ToolSnapshot StepKind = "tool_snapshot" // the task's allowed tools, saved once at start
 )
 
 // Step is one entry in a task's append-only log.
 type Step struct {
 	Kind   StepKind
-	CallID string  // tool call ID; empty for model replies
-	Msg    Message // the reply or tool result; for an intent, ToolCalls holds the call
+	CallID string    // tool call ID; empty for model replies
+	Msg    Message   // the reply or tool result; for an intent, ToolCalls holds the call
+	Tools  []ToolDef // ToolSnapshot only
 }
 
 // Task statuses, kept by the Store with each task.
@@ -187,7 +198,11 @@ func (r *Runner) Run(ctx context.Context, task Task) (Result, error) {
 		log.Error(klog.MsgTaskFailed, "err", err)
 		return Result{}, fmt.Errorf("task %s: %w", task.ID, err)
 	}
-	tools, err := r.allowedTools(ctx, task)
+	history, tools, err := r.prepare(ctx, task, log)
+	if errors.Is(err, ErrToolsChanged) {
+		log.Error(klog.MsgTaskBlocked, "err", err) // status unchanged; resumes once the tools match
+		return Result{}, fmt.Errorf("task %s: %w", task.ID, err)
+	}
 	if err != nil {
 		log.Error(klog.MsgTaskFailed, "err", err)
 		return Result{}, fmt.Errorf("task %s: %w", task.ID, err)
@@ -197,7 +212,7 @@ func (r *Runner) Run(ctx context.Context, task Task) (Result, error) {
 		return Result{}, fmt.Errorf("task %s: save task: %w", task.ID, err)
 	}
 
-	t, err := r.start(ctx, task, tools, log)
+	t, err := r.start(ctx, task, history, tools, log)
 	var text string
 	if err == nil {
 		text, err = t.run(ctx)
@@ -251,15 +266,38 @@ func (r *Runner) check(task Task) error {
 	return nil
 }
 
-// allowedTools lists the tools and returns those task.AllowedTools matches.
-// A pattern that matches no tool is an error, so a typo stops the task
-// before it is saved.
-func (r *Runner) allowedTools(ctx context.Context, task Task) ([]ToolDef, error) {
+// prepare loads the task's history and decides its tools, before anything is
+// saved: errors here leave the task as it was. A task without a tool snapshot
+// gets the tools its patterns match; a resumed one gets its snapshot's tools.
+func (r *Runner) prepare(ctx context.Context, task Task, log *klog.Logger) ([]Step, []ToolDef, error) {
 	listed, err := r.Tools.List(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("list tools: %w", err)
+		return nil, nil, fmt.Errorf("list tools: %w", err)
 	}
-	allowed, unmatchedPatterns := matchTools(listed, task.AllowedTools)
+	history, err := r.Store.Load(ctx, task.ID)
+	if err != nil {
+		return nil, nil, fmt.Errorf("load: %w", err)
+	}
+	snapshot := lastToolSnapshot(history)
+	var tools []ToolDef
+	switch {
+	case snapshot == nil:
+		tools, err = allowedTools(listed, task.AllowedTools)
+	case finished(history):
+		tools = snapshot // no tool runs; keel run prints the saved answer
+	default:
+		tools, err = toolsSinceSnapshot(snapshot, listed, task.AllowedTools, log)
+	}
+	if err != nil {
+		return nil, nil, err
+	}
+	return history, tools, nil
+}
+
+// allowedTools returns the listed tools that patterns match. A pattern that
+// matches no tool is an error, so a typo stops the task before it is saved.
+func allowedTools(listed []ToolDef, patterns []string) ([]ToolDef, error) {
+	allowed, unmatchedPatterns := matchTools(listed, patterns)
 	if len(unmatchedPatterns) > 0 {
 		return nil, fmt.Errorf("allow %q: no tool matches", unmatchedPatterns)
 	}
@@ -269,15 +307,101 @@ func (r *Runner) allowedTools(ctx context.Context, task Task) ([]ToolDef, error)
 	return allowed, nil
 }
 
-// start rebuilds the task's state from the store; tools are the task's
-// allowed tools.
-func (r *Runner) start(ctx context.Context, task Task, tools []ToolDef, log *klog.Logger) (*taskRun, error) {
-	history, err := r.Store.Load(ctx, task.ID)
-	if err != nil {
-		return nil, fmt.Errorf("load: %w", err)
+// toolsSinceSnapshot returns the snapshot's tools that are still listed, with
+// the snapshot's definitions. A tool whose description, schema or hints
+// changed is ErrToolsChanged, and so is no tool left. Tools that patterns
+// match but the snapshot doesn't have are logged and ignored.
+func toolsSinceSnapshot(snapshot, listed []ToolDef, patterns []string, log *klog.Logger) ([]ToolDef, error) {
+	matched, _ := matchTools(listed, patterns)
+	for _, tool := range matched {
+		if !slices.ContainsFunc(snapshot, func(d ToolDef) bool { return d.Name == tool.Name }) {
+			log.Info(klog.MsgToolAdded, "tool", tool.Name)
+		}
 	}
+	var stillListed []ToolDef
+	var changes []string // e.g. "fs__read_file: description, schema"
+	for _, saved := range snapshot {
+		i := slices.IndexFunc(listed, func(d ToolDef) bool { return d.Name == saved.Name })
+		if i < 0 {
+			log.Warn(klog.MsgToolRemoved, "tool", saved.Name)
+			continue
+		}
+		if fields := changedFields(saved, listed[i]); len(fields) > 0 {
+			changes = append(changes, saved.Name+": "+strings.Join(fields, ", "))
+			continue
+		}
+		stillListed = append(stillListed, saved)
+	}
+	if len(changes) > 0 {
+		return nil, fmt.Errorf("%w: %s", ErrToolsChanged, strings.Join(changes, "; "))
+	}
+	if len(stillListed) == 0 {
+		return nil, fmt.Errorf("%w: no tool of the snapshot is listed", ErrToolsChanged)
+	}
+	return stillListed, nil
+}
+
+// changedFields names the fields of listed that differ from saved:
+// "description", "schema", "hints".
+func changedFields(saved, listed ToolDef) []string {
+	var fields []string
+	if saved.Description != listed.Description {
+		fields = append(fields, "description")
+	}
+	if !sameJSON(saved.InputSchema, listed.InputSchema) {
+		fields = append(fields, "schema")
+	}
+	if saved.Hints != listed.Hints {
+		fields = append(fields, "hints")
+	}
+	return fields
+}
+
+// sameJSON reports whether a and b hold the same JSON value; key order is
+// ignored. Invalid JSON is compared byte by byte.
+func sameJSON(a, b json.RawMessage) bool {
+	var va, vb any
+	if json.Unmarshal(a, &va) != nil || json.Unmarshal(b, &vb) != nil {
+		return bytes.Equal(a, b)
+	}
+	return reflect.DeepEqual(va, vb)
+}
+
+// lastToolSnapshot returns the tools of the last ToolSnapshot step in
+// history, or nil if there is none.
+func lastToolSnapshot(history []Step) []ToolDef {
+	for i := len(history) - 1; i >= 0; i-- {
+		if history[i].Kind == ToolSnapshot {
+			return history[i].Tools
+		}
+	}
+	return nil
+}
+
+// finished reports whether the last model reply in history ends the task.
+func finished(history []Step) bool {
+	for i := len(history) - 1; i >= 0; i-- {
+		if history[i].Kind == ModelReply {
+			done, _ := ends(history[i].Msg)
+			return done
+		}
+	}
+	return false
+}
+
+// start rebuilds the task's state from history and saves a tool snapshot
+// if the task has none; tools are the task's allowed tools.
+func (r *Runner) start(ctx context.Context, task Task, history []Step, tools []ToolDef, log *klog.Logger) (*taskRun, error) {
 	t := &taskRun{r: r, task: task, tools: tools, log: log}
 	t.replay(history)
+	if lastToolSnapshot(history) == nil {
+		if err := t.save(ctx, Step{Kind: ToolSnapshot, Tools: tools}); err != nil {
+			return nil, fmt.Errorf("save tool snapshot: %w", err)
+		}
+		if len(history) > 0 {
+			log.Warn(klog.MsgToolSnapshot, "reason", "task saved before tool snapshots")
+		}
+	}
 	if len(history) == 0 {
 		log.Info(klog.MsgTaskStart, "model", task.Model, "max_steps", task.MaxSteps, "tools", len(tools))
 	} else {
