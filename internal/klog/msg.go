@@ -23,6 +23,7 @@ const (
 	MsgToolSkipped = "tool skipped" // has a result from before a restart
 	MsgToolDenied  = "tool denied"  // not in the task's allowed tools
 	MsgToolRetry   = "tool retry"   // server down; read-only or idempotent, so called again
+	MsgIntentRerun = "intent rerun" // intent without a result from before a restart; safe, so called again
 
 	// the task's tools (runner); see local/design-notes.md, "Tool snapshot"
 	MsgToolSnapshot = "tool snapshot" // WARN: saved late, for a task from before snapshots
@@ -44,4 +45,5 @@ const (
 	MsgMCPStderr      = "mcp stderr"         // a line the server wrote to stderr
 	MsgMCPTools       = "mcp tools"          // tools=<count> listed
 	MsgMCPToolSkipped = "mcp tool skipped"   // not offered to the model
+	MsgMCPHintUnused  = "mcp hint unused"    // a hint override matches no tool of its server
 )

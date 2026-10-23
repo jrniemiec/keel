@@ -12,6 +12,7 @@ import (
 	"maps"
 	"os"
 	"os/exec"
+	"path"
 	"regexp"
 	"slices"
 	"strings"
@@ -35,6 +36,45 @@ type Server struct {
 	Command string   // e.g. "mcp-filesystem-server"
 	Args    []string // e.g. the directories it may access
 	Env     []string // "KEY=value", added to keel's environment
+	Hints   []HintOverride
+}
+
+// HintOverride corrects the hints a server gives the tools that Tools
+// matches: the tool's own name, without the server prefix, or a path.Match
+// pattern. A nil hint keeps the server's value. Overrides apply in order.
+type HintOverride struct {
+	Tools       string `json:"tools"` // e.g. "read_*"
+	ReadOnly    *bool  `json:"read_only"`
+	Destructive *bool  `json:"destructive"`
+	Idempotent  *bool  `json:"idempotent"`
+	OpenWorld   *bool  `json:"open_world"`
+}
+
+// apply returns hints with o's non-nil hints set.
+func (o HintOverride) apply(hints runner.Hints) runner.Hints {
+	set := func(dst *bool, src *bool) {
+		if src != nil {
+			*dst = *src
+		}
+	}
+	set(&hints.ReadOnly, o.ReadOnly)
+	set(&hints.Destructive, o.Destructive)
+	set(&hints.Idempotent, o.Idempotent)
+	set(&hints.OpenWorld, o.OpenWorld)
+	return hints
+}
+
+// withOverrides returns serverHints of tool with the overrides that match
+// it applied in order, and marks each matching override in used.
+func withOverrides(tool string, serverHints runner.Hints, overrides []HintOverride, used []bool) runner.Hints {
+	hints := serverHints
+	for i, o := range overrides {
+		if ok, _ := path.Match(o.Tools, tool); ok {
+			hints = o.apply(hints)
+			used[i] = true
+		}
+	}
+	return hints
 }
 
 // Host holds a session with each started server. All maps are by server
@@ -120,6 +160,8 @@ func (h *Host) List(ctx context.Context) ([]runner.ToolDef, error) {
 	var out []runner.ToolDef
 	for _, name := range slices.Sorted(maps.Keys(h.sessions)) {
 		cs := h.sessions[name]
+		overrides := h.servers[name].Hints
+		used := make([]bool, len(overrides))
 		n := 0
 		for t, err := range cs.Tools(ctx, nil) {
 			if err != nil {
@@ -134,15 +176,22 @@ func (h *Host) List(ctx context.Context) ([]runner.ToolDef, error) {
 			if err != nil {
 				return nil, fmt.Errorf("schema of %s: %w", full, err)
 			}
+			serverHints := hints(t.Annotations)
 			out = append(out, runner.ToolDef{
 				Name:        full,
 				Description: t.Description,
 				InputSchema: schema,
-				Hints:       hints(t.Annotations),
+				Hints:       withOverrides(t.Name, serverHints, overrides, used),
+				ServerHints: serverHints,
 			})
 			n++
 		}
 		klog.Info(klog.MsgMCPTools, "server", name, "tools", n)
+		for i, o := range overrides {
+			if !used[i] {
+				klog.Warn(klog.MsgMCPHintUnused, "server", name, "tools", o.Tools)
+			}
+		}
 	}
 	return out, nil
 }

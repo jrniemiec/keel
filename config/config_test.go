@@ -72,6 +72,10 @@ func TestLoadKeelConfigErrors(t *testing.T) {
 		{"timeout as a number", `{"providers": {"anthropic": {"timeout": 600}}}`, `want a string such as "10m"`},
 		{"no tool output", `{"max_tool_output": 0}`, "max_tool_output must be > 0"},
 		{"no keys in config", `{"providers": {"anthropic": {"api_key_env": "X"}}}`, `unknown field "api_key_env"`},
+		{"hint bad pattern", `{"servers": {"fs": {"command": "x", "hints": [{"tools": "read_[", "read_only": true}]}}}`, `hints[0]: tools "read_["`},
+		{"hint no tools", `{"servers": {"fs": {"command": "x", "hints": [{"read_only": true}]}}}`, `hints[0]: tools ""`},
+		{"hint none set", `{"servers": {"fs": {"command": "x", "hints": [{"tools": "read_*"}]}}}`, "hints[0]: no hint set"},
+		{"hint unknown key", `{"servers": {"fs": {"command": "x", "hints": [{"tools": "read_*", "readonly": true}]}}}`, `unknown field "readonly"`},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -193,6 +197,10 @@ func TestExamples(t *testing.T) {
 	}
 	if err := CheckTaskConfig(kc, tc); err != nil {
 		t.Error(err)
+	}
+
+	if n := len(kc.Servers["fs"].Hints); n != 6 {
+		t.Errorf("fs hints = %d, want the example's 6", n)
 	}
 
 	got := kc

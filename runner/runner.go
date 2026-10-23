@@ -22,12 +22,13 @@ type ToolDef struct {
 	Name        string          // unique; matched by AllowedTools patterns and ToolCall.Name
 	Description string          // tells the model what the tool does and when to use it
 	InputSchema json.RawMessage // JSON Schema for the arguments, e.g. {"type":"object","properties":{"query":{"type":"string"}}}
-	Hints       Hints           // kept in keel, not sent to the model
+	Hints       Hints           // effective: the server's, then the config's overrides; kept in keel, not sent to the model
+	ServerHints Hints           // as the server sent them; the tool snapshot compares these
 }
 
 // Hints describe a tool's effects (MCP tool annotations). They come from the
-// tool's server and are untrusted; local policy overrides them. Tools sets the
-// MCP defaults when a server omits a hint.
+// tool's server and are untrusted; the keel config can override them. Tools
+// sets the MCP defaults when a server omits a hint.
 type Hints struct {
 	ReadOnly    bool // changes nothing
 	Destructive bool // may delete or overwrite; MCP default true
@@ -57,6 +58,12 @@ type Tools interface {
 // once per run. Run retries the call only for a read-only or idempotent tool;
 // otherwise the run stops and the task stays running.
 var ErrServerDown = errors.New("tool server down")
+
+// ErrOutcomeUnknown is returned by Run when a resumed task has an intent
+// without a result for a tool that is neither read-only nor idempotent: the
+// call may have run before the restart, so it isn't run again. The task
+// stays as it was.
+var ErrOutcomeUnknown = errors.New("tool call outcome unknown")
 
 // Runner runs tasks: it drives the loop between the model and the tools.
 type Runner struct {
@@ -232,7 +239,7 @@ func (r *Runner) Run(ctx context.Context, task Task) (Result, error) {
 			log.Warn(klog.MsgTaskStopped, "model_calls", steps, "dur", since(began), "err", err)
 			return Result{Steps: steps}, fmt.Errorf("task %s: %w", task.ID, err)
 		}
-		if errors.Is(err, ErrServerDown) { // the environment, not the task: stays running
+		if errors.Is(err, ErrServerDown) || errors.Is(err, ErrOutcomeUnknown) { // not the task's fault: stays running
 			log.Error(klog.MsgTaskBlocked, "model_calls", steps, "dur", since(began), "err", err)
 			return Result{Steps: steps}, fmt.Errorf("task %s: %w", task.ID, err)
 		}
@@ -251,15 +258,16 @@ func (r *Runner) Run(ctx context.Context, task Task) (Result, error) {
 
 // taskRun is the state of one Run.
 type taskRun struct {
-	r     *Runner
-	task  Task
-	tools []ToolDef       // the task's allowed tools
-	msgs  []Message       // the conversation so far
-	done  map[string]bool // IDs of tool calls with a saved result
-	steps int             // model replies so far
-	last  *Message        // the last saved reply when Run started; nil for a new task
-	seq   int             // steps in the task's log so far; the next one is seq+1
-	log   *klog.Logger    // with task=<id>
+	r       *Runner
+	task    Task
+	tools   []ToolDef       // the task's allowed tools
+	msgs    []Message       // the conversation so far
+	done    map[string]bool // IDs of tool calls with a saved result
+	pending map[string]bool // IDs of tool calls with an intent and no result (from before a restart)
+	steps   int             // model replies so far
+	last    *Message        // the last saved reply when Run started; nil for a new task
+	seq     int             // steps in the task's log so far; the next one is seq+1
+	log     *klog.Logger    // with task=<id>
 }
 
 // check checks the runner and the task before anything is saved.
@@ -318,7 +326,8 @@ func allowedTools(listed []ToolDef, patterns []string) ([]ToolDef, error) {
 }
 
 // toolsSinceSnapshot returns the snapshot's tools that are still listed, with
-// the snapshot's definitions. A tool whose description, schema or hints
+// the snapshot's definitions and the current effective Hints (overrides may
+// change between runs). A tool whose description, schema or server hints
 // changed is ErrToolsChanged, and so is no tool left. Tools that patterns
 // match but the snapshot doesn't have are logged and ignored.
 func toolsSinceSnapshot(snapshot, listed []ToolDef, patterns []string, log *klog.Logger) ([]ToolDef, error) {
@@ -331,6 +340,9 @@ func toolsSinceSnapshot(snapshot, listed []ToolDef, patterns []string, log *klog
 	var stillListed []ToolDef
 	var changes []string // e.g. "fs__read_file: description, schema"
 	for _, saved := range snapshot {
+		if saved.ServerHints == (Hints{}) {
+			saved.ServerHints = saved.Hints // saved before ServerHints, when there were no overrides
+		}
 		i := slices.IndexFunc(listed, func(d ToolDef) bool { return d.Name == saved.Name })
 		if i < 0 {
 			log.Warn(klog.MsgToolRemoved, "tool", saved.Name)
@@ -340,6 +352,7 @@ func toolsSinceSnapshot(snapshot, listed []ToolDef, patterns []string, log *klog
 			changes = append(changes, saved.Name+": "+strings.Join(fields, ", "))
 			continue
 		}
+		saved.Hints = listed[i].Hints // the current overrides apply
 		stillListed = append(stillListed, saved)
 	}
 	if len(changes) > 0 {
@@ -361,7 +374,7 @@ func changedFields(saved, listed ToolDef) []string {
 	if !sameJSON(saved.InputSchema, listed.InputSchema) {
 		fields = append(fields, "schema")
 	}
-	if saved.Hints != listed.Hints {
+	if saved.ServerHints != listed.ServerHints { // overrides may change; the server's hints may not
 		fields = append(fields, "hints")
 	}
 	return fields
@@ -532,12 +545,21 @@ func (t *taskRun) callTool(ctx context.Context, call ToolCall) (out string, fail
 		t.log.Warn(klog.MsgToolDenied, "tool", call.Name, "call_id", call.ID)
 		return fmt.Sprintf("tool %s is not available", call.Name), true, nil
 	}
-	// Intent before the side effect. On resume, an intent without a
-	// result is run again; safe only for idempotent tools (approval later).
-	if err := t.save(ctx, Step{Kind: Intent, CallID: call.ID, Msg: Message{ToolCalls: []ToolCall{call}}}); err != nil {
-		return "", false, fmt.Errorf("save intent: %w", err)
+	if t.pending[call.ID] {
+		// An intent without a result: the call may have run before the
+		// restart. Repeat it only if that's safe; its intent is saved already.
+		if !t.safeToRepeat(call.Name) {
+			return "", false, fmt.Errorf("%w: %s (call %s) may have run before the restart", ErrOutcomeUnknown, call.Name, call.ID)
+		}
+		t.log.Warn(klog.MsgIntentRerun, "tool", call.Name, "call_id", call.ID)
+		delete(t.pending, call.ID)
+	} else {
+		// Intent before the side effect.
+		if err := t.save(ctx, Step{Kind: Intent, CallID: call.ID, Msg: Message{ToolCalls: []ToolCall{call}}}); err != nil {
+			return "", false, fmt.Errorf("save intent: %w", err)
+		}
+		t.log.Info(klog.MsgToolCall, "seq", t.seq, "kind", Intent, "tool", call.Name, "call_id", call.ID)
 	}
-	t.log.Info(klog.MsgToolCall, "seq", t.seq, "kind", Intent, "tool", call.Name, "call_id", call.ID)
 	t.log.Debug(klog.MsgToolArgs, "seq", t.seq, "args", string(call.Args))
 	out, failed, err = t.r.Tools.Call(ctx, call)
 	if errors.Is(err, ErrServerDown) && ctx.Err() == nil && t.safeToRepeat(call.Name) {
@@ -564,6 +586,7 @@ func (t *taskRun) safeToRepeat(name string) bool {
 func (t *taskRun) replay(history []Step) {
 	t.msgs = []Message{{Role: "user", Text: t.task.Goal}}
 	t.done = map[string]bool{}
+	t.pending = map[string]bool{}
 	t.seq = len(history)
 	for _, s := range history {
 		switch s.Kind {
@@ -572,9 +595,12 @@ func (t *taskRun) replay(history []Step) {
 			t.steps++
 			m := s.Msg
 			t.last = &m
+		case Intent:
+			t.pending[s.CallID] = true
 		case ToolResult:
 			t.msgs = append(t.msgs, s.Msg)
 			t.done[s.CallID] = true
+			delete(t.pending, s.CallID)
 		}
 	}
 }

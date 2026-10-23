@@ -47,6 +47,23 @@
       "command": "~/go/bin/mcp-filesystem-server",
       "args": ["~/.keel/demo"],
       "env": {},
+
+      // Corrections to the hints the server gives its tools. keel retries a
+      // call after a crash, or reruns it on resume, only if the tool is
+      // read_only or idempotent. tools is the tool's name without the
+      // server prefix, or a pattern (path.Match: *, ?, [...]). Entries apply
+      // in order, later ones win; a hint left out keeps the server's value.
+      // Hints: read_only, destructive, idempotent, open_world.
+      // This server marks every tool destructive and not read-only.
+      "hints": [
+        {"tools": "read_*", "read_only": true, "destructive": false},
+        {"tools": "list_*", "read_only": true, "destructive": false},
+        {"tools": "search_*", "read_only": true, "destructive": false},
+        {"tools": "get_file_info", "read_only": true, "destructive": false},
+        {"tools": "tree", "read_only": true, "destructive": false},
+        // The same content written twice gives the same file.
+        {"tools": "write_file", "idempotent": true},
+      ],
     },
   },
 

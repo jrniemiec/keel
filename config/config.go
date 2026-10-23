@@ -88,6 +88,9 @@ type ServerConfig struct {
 	Command string            `json:"command"`
 	Args    []string          `json:"args"`
 	Env     map[string]string `json:"env"` // added to keel's environment
+	// Hints correct the hints the server gives its tools; in order, later
+	// ones win. E.g. {"tools": "read_*", "read_only": true}.
+	Hints []mcphost.HintOverride `json:"hints"`
 }
 
 // Providers holds each provider's settings. API keys are not here: they
@@ -216,8 +219,17 @@ func (kc *KeelConfig) check() error {
 		errs = append(errs, errors.New("log_file is empty"))
 	}
 	for _, name := range slices.Sorted(maps.Keys(kc.Servers)) {
-		if kc.Servers[name].Command == "" {
+		s := kc.Servers[name]
+		if s.Command == "" {
 			errs = append(errs, fmt.Errorf("server %q: command is empty", name))
+		}
+		for i, o := range s.Hints {
+			if _, err := path.Match(o.Tools, ""); err != nil || o.Tools == "" {
+				errs = append(errs, fmt.Errorf("server %q: hints[%d]: tools %q: want a tool name or pattern", name, i, o.Tools))
+			}
+			if o.ReadOnly == nil && o.Destructive == nil && o.Idempotent == nil && o.OpenWorld == nil {
+				errs = append(errs, fmt.Errorf("server %q: hints[%d]: no hint set", name, i))
+			}
 		}
 	}
 	if _, ok := klog.ParseLevel(kc.LogLevel); !ok {
@@ -325,7 +337,7 @@ func (kc KeelConfig) MCPServers(names []string) []mcphost.Server {
 		for _, k := range slices.Sorted(maps.Keys(s.Env)) {
 			env = append(env, k+"="+s.Env[k])
 		}
-		out = append(out, mcphost.Server{Name: name, Command: s.Command, Args: s.Args, Env: env})
+		out = append(out, mcphost.Server{Name: name, Command: s.Command, Args: s.Args, Env: env, Hints: s.Hints})
 	}
 	return out
 }
