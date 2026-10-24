@@ -85,9 +85,10 @@ type TaskDefaults struct {
 
 // ServerConfig is an MCP server that keel starts as a child process.
 type ServerConfig struct {
-	Command string            `json:"command"`
-	Args    []string          `json:"args"`
-	Env     map[string]string `json:"env"` // added to keel's environment
+	Description string            `json:"description"` // what it offers, for keel servers; optional
+	Command     string            `json:"command"`
+	Args        []string          `json:"args"`
+	Env         map[string]string `json:"env"` // added to keel's environment
 	// Hints correct the hints the server gives its tools; in order, later
 	// ones win. E.g. {"tools": "read_*", "read_only": true}.
 	Hints []mcphost.HintOverride `json:"hints"`

@@ -12,7 +12,8 @@ func TestHelpListsFlags(t *testing.T) {
 	run, _ := newRunFlags()
 	tasks, _ := newShowFlags("tasks", true)
 	steps, _ := newShowFlags("steps", false)
-	for _, fs := range []*flag.FlagSet{run, tasks, steps} {
+	servers, _ := newServersFlags()
+	for _, fs := range []*flag.FlagSet{run, tasks, steps, servers} {
 		fs.VisitAll(func(f *flag.Flag) {
 			if f.Name == "crash-at" {
 				return

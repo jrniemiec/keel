@@ -39,11 +39,13 @@
   },
 
   // MCP servers, started over stdio. A tool is named <server>__<tool>,
-  // e.g. fs__read_file. env adds variables to the server's environment.
+  // e.g. fs__read_file. description is shown by keel servers (optional);
+  // env adds variables to the server's environment.
   "servers": {
     // github.com/mark3labs/mcp-filesystem-server; it may access only the
     // folders given as args.
     "fs": {
+      "description": "Files in ~/.keel/demo: read, list, search, write",
       "command": "~/go/bin/mcp-filesystem-server",
       "args": ["~/.keel/demo"],
       "env": {},

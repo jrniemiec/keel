@@ -38,6 +38,7 @@ Usage:
   keel run [flags] <task>
   keel tasks [flags]
   keel steps [flags] <task-id>
+  keel servers [flags]
 
 Commands:
   run    Run a task, or resume it from its last saved step after a crash
@@ -52,6 +53,11 @@ Commands:
   steps  Show a task's steps in order: model replies, tool calls and
          results. <task-id> is a task ID in the database (keel tasks),
          not a task config.
+  servers
+         List the MCP servers in the keel config, with the description
+         given there. With --tools, start them
+         and list their tools: the names to use in a task's allow list,
+         and the hints keel uses, after the keel config's overrides.
 
 Flags for run:
   -c, --config <file>      use this keel config (servers, db, log) instead of $KEEL_HOME/config/keel.jsonc (KEEL_HOME default ~/.keel)
@@ -68,6 +74,10 @@ Flags for tasks and steps:
       --full               tasks: NOTE whole, on one line; steps: text whole, below its row, and tool args
   -h, --help               show this help
 
+Flags for servers:
+  -c, --config <file>      use this keel config instead of $KEEL_HOME/config/keel.jsonc
+      --tools              start the servers and list their tools with hints
+
 Files ($KEEL_HOME, default ~/.keel):
   config/keel.jsonc           keel config: servers, db, log; one per machine
   config/tasks/<task>.jsonc   task configs, one per task
@@ -82,6 +92,7 @@ Examples:
   keel run -d /tmp/test.db -v notes           experiment in a separate database
   keel tasks -s waiting                       blocked tasks and why
   keel steps --full notes                     everything the task said and did
+  keel servers --tools                        tool names for a task's allow list
 
 Log file: log_file in the keel config (default ~/.keel/keel.log); follow it with tail -f.
 Watch all tasks: kstat -w.
@@ -91,7 +102,7 @@ API keys are read from the environment, never from a config file:
   Ollama models      no key
 `
 
-const usageLine = "usage: keel run [flags] <task> | keel tasks [flags] | keel steps [flags] <task-id>\nrun 'keel -h' for help"
+const usageLine = "usage: keel run [flags] <task> | keel tasks [flags] | keel steps [flags] <task-id> | keel servers [flags]\nrun 'keel -h' for help"
 
 // usageError is a mistake on the command line: exit 2 with the usage line.
 type usageError struct{ msg string }
@@ -125,6 +136,8 @@ func dispatch(args []string) error {
 		return tasks(args[1:], os.Stdout)
 	case "steps":
 		return steps(args[1:], os.Stdout)
+	case "servers":
+		return servers(args[1:], os.Stdout)
 	default:
 		return usageError{fmt.Sprintf("unknown command %q", args[0])}
 	}
