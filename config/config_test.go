@@ -6,6 +6,8 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/jrniemiec/keel/runner"
 )
 
 func write(t *testing.T, name, content string) string {
@@ -76,6 +78,7 @@ func TestLoadKeelConfigErrors(t *testing.T) {
 		{"hint no tools", `{"servers": {"fs": {"command": "x", "hints": [{"read_only": true}]}}}`, `hints[0]: tools ""`},
 		{"hint none set", `{"servers": {"fs": {"command": "x", "hints": [{"tools": "read_*"}]}}}`, "hints[0]: no hint set"},
 		{"hint unknown key", `{"servers": {"fs": {"command": "x", "hints": [{"tools": "read_*", "readonly": true}]}}}`, `unknown field "readonly"`},
+		{"bad default approval", `{"defaults": {"approval": {"destructive": "never"}}}`, `defaults: approval destructive "never"`},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -88,7 +91,7 @@ func TestLoadKeelConfigErrors(t *testing.T) {
 }
 
 func TestLoadTaskConfig(t *testing.T) {
-	d := TaskDefaults{Model: "ollama:m", Thinking: true, System: "s", MaxSteps: 7}
+	d := TaskDefaults{Model: "ollama:m", Thinking: true, System: "s", MaxSteps: 7, Approval: Default().Defaults.Approval}
 	tc, err := LoadTaskConfig(write(t, "notes.jsonc", `{"name": "t1", "goal": "g", "servers": ["fs"], "allow": ["fs__read_file"]}`), d)
 	if err != nil {
 		t.Fatal(err)
@@ -100,10 +103,18 @@ func TestLoadTaskConfig(t *testing.T) {
 	if err != nil || tc.Thinking || tc.MaxSteps != 3 {
 		t.Errorf("got %+v, %v; want the file's values over the defaults", tc, err)
 	}
+	if tc.Approval != d.Approval {
+		t.Errorf("Approval = %+v, want the defaults", tc.Approval)
+	}
 	tc.Allow = []string{"fs__read_file"}
 	task := tc.RunnerTask()
 	if task.ID != "t1" || task.Model != d.Model || task.AllowedTools[0] != "fs__read_file" {
 		t.Errorf("RunnerTask = %+v", task)
+	}
+
+	tc, err = LoadTaskConfig(write(t, "notes.jsonc", `{"name": "t1", "approval": {"destructive": "auto"}}`), d)
+	if want := (runner.Approval{Read: "auto", Write: "ask", Destructive: "auto"}); err != nil || tc.Approval != want {
+		t.Errorf("Approval = %+v, %v; want %+v: the file's key over the defaults, the rest kept", tc.Approval, err, want)
 	}
 
 	if _, err := LoadTaskConfig(filepath.Join(t.TempDir(), "missing.jsonc"), d); err == nil {
@@ -117,7 +128,8 @@ func TestLoadTaskConfig(t *testing.T) {
 
 func TestCheckTaskConfig(t *testing.T) {
 	kc := KeelConfig{Servers: map[string]ServerConfig{"fs": {Command: "fs"}, "web": {Command: "web"}}}
-	good := TaskConfig{Name: "t1", Goal: "g", Model: "anthropic:claude-x", MaxSteps: 5, Servers: []string{"fs"}, Allow: []string{"fs__read_file"}}
+	good := TaskConfig{Name: "t1", Goal: "g", Model: "anthropic:claude-x", MaxSteps: 5, Servers: []string{"fs"}, Allow: []string{"fs__read_file"},
+		Approval: Default().Defaults.Approval}
 	if err := CheckTaskConfig(kc, good); err != nil {
 		t.Fatalf("good task: %v", err)
 	}
@@ -141,6 +153,7 @@ func TestCheckTaskConfig(t *testing.T) {
 		{"bad pattern", func(tc *TaskConfig) { tc.Allow = []string{"fs__[read"} }, "bad pattern"},
 		{"wildcard server", func(tc *TaskConfig) { tc.Allow = []string{"*__read_file"} }, `allow "*__read_file"`},
 		{"bare wildcard", func(tc *TaskConfig) { tc.Allow = []string{"*"} }, `allow "*"`},
+		{"bad approval", func(tc *TaskConfig) { tc.Approval.Write = "yes" }, `approval write "yes": want auto or ask`},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -209,8 +222,8 @@ func TestExamples(t *testing.T) {
 		t.Errorf("examples/config/keel.jsonc differs from Default():\n got %+v\nwant %+v", got, want)
 	}
 	d := kc.Defaults
-	if tc.Model != d.Model || tc.Thinking != d.Thinking || tc.System != d.System {
-		t.Errorf("notes.jsonc: model, thinking or system differ from the defaults")
+	if tc.Model != d.Model || tc.Thinking != d.Thinking || tc.System != d.System || tc.Approval != d.Approval {
+		t.Errorf("notes.jsonc: model, thinking, system or approval differ from the defaults")
 	}
 }
 

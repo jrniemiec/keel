@@ -36,6 +36,13 @@
 
     // Model calls before the task fails with "step limit reached".
     "max_steps": 20,
+
+    // Per tool class: "auto" runs the call, "ask" makes keel run ask first
+    // (y/a/n/m at the prompt; without a terminal the task waits for the next
+    // keel run). The class comes from the tool's hints, after the overrides
+    // below: read (read_only), destructive (may delete or overwrite), write
+    // (the rest). A tool left out of a task's allow list is never called.
+    "approval": { "read": "auto", "write": "ask", "destructive": "ask" },
   },
 
   // MCP servers, started over stdio. A tool is named <server>__<tool>,

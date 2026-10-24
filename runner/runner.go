@@ -2,10 +2,12 @@ package runner
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"path"
 	"reflect"
 	"slices"
@@ -67,10 +69,12 @@ var ErrOutcomeUnknown = errors.New("tool call outcome unknown")
 
 // Runner runs tasks: it drives the loop between the model and the tools.
 type Runner struct {
-	Model  Model
-	Tools  Tools
-	Store  Store
-	Logger *klog.Logger // progress log; nil = klog.Default()
+	Model    Model
+	Tools    Tools
+	Store    Store
+	Approver Approver     // asks before a call the task's Approval says "ask" for; nil: the task waits
+	Progress io.Writer    // one line per model reply and tool call, for a human; nil = none
+	Logger   *klog.Logger // progress log; nil = klog.Default()
 }
 
 // Task represents a task to be executed by the Runner. The Store saves it on
@@ -82,6 +86,7 @@ type Task struct {
 	AllowedTools []string // tool names or path.Match patterns, e.g. "fs__read_*"
 	Model        string   // e.g. "anthropic:claude-sonnet-5"
 	MaxSteps     int
+	Approval     Approval // per tool class: "auto" or "ask"
 
 	// Not used by the runner: the Model is set up with them (one task per
 	// process for now). Saved here so a resume checks them too.
@@ -137,8 +142,9 @@ var ErrToolsChanged = errors.New("tools changed since the task started")
 
 // Result is the outcome of a finished task.
 type Result struct {
-	Text  string // the model's final answer
-	Steps int    // model calls made
+	Text   string        // the model's final answer
+	Steps  int           // model calls made
+	Waited time.Duration // time this run spent waiting for approvals
 }
 
 // StepKind says what a saved step records.
@@ -146,10 +152,16 @@ type StepKind string
 
 const (
 	ModelReply StepKind = "model_reply" // the model's reply
-	Intent     StepKind = "intent"      // about to run a tool call
+	Intent     StepKind = "intent"      // about to run a tool call; Msg.Text says why it may (Allowed…)
 	ToolResult StepKind = "tool_result" // the tool call's result
 
 	ToolSnapshot StepKind = "tool_snapshot" // the task's allowed tools, saved once at start
+
+	// Approvals; each has CallID and the call in Msg.ToolCalls. A decision
+	// applies to the last ask of its call, until the call's next intent.
+	ApprovalAsked StepKind = "approval_asked" // a call waits for a decision; Msg.Text is the reason
+	Approved      StepKind = "approved"       // Msg.Text is "approved for this run" for an "always" answer
+	Rejected      StepKind = "rejected"       // Msg.Text is the user's message for the model
 )
 
 // Step is one entry in a task's append-only log.
@@ -163,7 +175,7 @@ type Step struct {
 // Task statuses, kept by the Store with each task.
 const (
 	TaskRunning = "running"
-	TaskWaiting = "waiting" // blocked: needs a human (see Store.BlockTask); later also approvals
+	TaskWaiting = "waiting" // needs a human: blocked or waiting for approval (see Store.BlockTask)
 	TaskDone    = "done"
 	TaskFailed  = "failed"
 )
@@ -230,7 +242,7 @@ func (r *Runner) Run(ctx context.Context, task Task) (Result, error) {
 		res.Text, err = t.run(ctx)
 	}
 	if t != nil {
-		res.Steps = t.steps
+		res.Steps, res.Waited = t.steps, t.waited
 	}
 	return r.end(ctx, log, task, true, began, res, err)
 }
@@ -239,11 +251,15 @@ func (r *Runner) Run(ctx context.Context, task Task) (Result, error) {
 // and err with the task's ID added:
 //   - done: FinishTask(TaskDone);
 //   - stopped (ctx done): no change, the task stays running;
+//   - waiting for approval (ErrApprovalNeeded): BlockTask, status TaskWaiting;
 //   - blocked by its environment (see blocked): BlockTask, status TaskWaiting;
 //   - failed: FinishTask(TaskFailed) once the task is saved (started);
 //     before that nothing is saved.
 func (r *Runner) end(ctx context.Context, log *klog.Logger, task Task, started bool, began time.Time, res Result, err error) (Result, error) {
 	attrs := []any{"model_calls", res.Steps, "dur", since(began)}
+	if res.Waited > 0 {
+		attrs = append(attrs, "waited", res.Waited.Round(time.Second))
+	}
 	var saveErr error
 	switch {
 	case err == nil:
@@ -251,6 +267,9 @@ func (r *Runner) end(ctx context.Context, log *klog.Logger, task Task, started b
 		saveErr = r.Store.FinishTask(ctx, task.ID, TaskDone, res.Text, "")
 	case ctx.Err() != nil:
 		log.Warn(klog.MsgTaskStopped, append(attrs, "err", err)...)
+	case errors.Is(err, ErrApprovalNeeded):
+		log.Info(klog.MsgTaskWaiting, append(attrs, "reason", err)...)
+		saveErr = r.Store.BlockTask(ctx, task.ID, err.Error())
 	case blocked(err):
 		log.Error(klog.MsgTaskBlocked, append(attrs, "err", err)...)
 		saveErr = r.Store.BlockTask(ctx, task.ID, err.Error())
@@ -264,7 +283,7 @@ func (r *Runner) end(ctx context.Context, log *klog.Logger, task Task, started b
 		err = errors.Join(err, fmt.Errorf("save status: %w", saveErr))
 	}
 	if err != nil {
-		return Result{Steps: res.Steps}, fmt.Errorf("task %s: %w", task.ID, err)
+		return Result{Steps: res.Steps, Waited: res.Waited}, fmt.Errorf("task %s: %w", task.ID, err)
 	}
 	return res, nil
 }
@@ -279,14 +298,19 @@ func blocked(err error) bool {
 type taskRun struct {
 	r       *Runner
 	task    Task
-	tools   []ToolDef       // the task's allowed tools
-	msgs    []Message       // the conversation so far
-	done    map[string]bool // IDs of tool calls with a saved result
-	pending map[string]bool // IDs of tool calls with an intent and no result (from before a restart)
-	steps   int             // model replies so far
-	last    *Message        // the last saved reply when Run started; nil for a new task
-	seq     int             // steps in the task's log so far; the next one is seq+1
-	log     *klog.Logger    // with task=<id>
+	tools   []ToolDef         // the task's allowed tools
+	msgs    []Message         // the conversation so far
+	done    map[string]bool   // IDs of tool calls with a saved result
+	pending map[string]bool   // IDs of tool calls with an intent and no result (from before a restart)
+	asked   map[string]string // reasons of calls asked for approval since their last intent, by call ID
+	decided map[string]Step   // approved or rejected steps since the call's last intent, by call ID
+	// tools approved for the rest of this run ("always"); not saved, so a resume asks again
+	approvedForRun map[string]bool
+	waited         time.Duration // spent waiting for approvals
+	steps          int           // model replies so far
+	last           *Message      // the last saved reply when Run started; nil for a new task
+	seq            int           // steps in the task's log so far; the next one is seq+1
+	log            *klog.Logger  // with task=<id>
 }
 
 // check checks the runner and the task before anything is saved.
@@ -300,7 +324,7 @@ func (r *Runner) check(task Task) error {
 	if task.Model == "" {
 		return errors.New("model must be specified")
 	}
-	return nil
+	return task.Approval.Check()
 }
 
 // prepare loads the task's history and decides its tools, before anything is
@@ -521,6 +545,15 @@ func (t *taskRun) ask(ctx context.Context) (Message, error) {
 		"stop", reply.Stop, "calls", len(reply.ToolCalls),
 		"in", reply.TokensIn, "out", reply.TokensOut, "dur", since(began))
 	t.log.Debug(klog.MsgModelText, "seq", t.seq, "text", reply.Text)
+	var calls []string
+	for _, c := range reply.ToolCalls {
+		calls = append(calls, c.Name)
+	}
+	if len(calls) > 0 {
+		t.progress("model  %s: %s", t.task.Model, strings.Join(calls, ", "))
+	} else {
+		t.progress("model  %s: %s", t.task.Model, cmp.Or(reply.Stop, "done"))
+	}
 	t.msgs = append(t.msgs, reply)
 	t.steps++
 	return reply, nil
@@ -548,9 +581,11 @@ func (t *taskRun) act(ctx context.Context, reply Message) error {
 		attrs := []any{"seq", t.seq, "kind", ToolResult, "tool", call.Name, "call_id", call.ID, "dur", since(began)}
 		if failed {
 			t.log.Warn(klog.MsgToolResult, append(attrs, "failed", true, "err", out)...)
+			t.progress("tool   %s %s: error: %s", call.Name, cut(string(call.Args), 80), cut(out, 80))
 		} else {
 			t.log.Info(klog.MsgToolResult, attrs...)
 			t.log.Debug(klog.MsgToolOut, "seq", t.seq, "text", out)
+			t.progress("tool   %s %s: ok", call.Name, cut(string(call.Args), 80))
 		}
 		t.msgs = append(t.msgs, res)
 		t.done[call.ID] = true
@@ -559,29 +594,60 @@ func (t *taskRun) act(ctx context.Context, reply Message) error {
 }
 
 // callTool runs call and returns the text for its tool result. A call to a tool
-// the task doesn't allow is not run, and a tool that ran and failed returns
-// its error text, both with failed set; the model sees them and can adjust. It
-// returns an error when the intent can't be saved, ctx is done or the tool
-// can't be called. Then no result is saved, and resume handles the call again.
+// the task doesn't allow is not run, a rejected call is not run, and a tool
+// that ran and failed returns its error text, all with failed set; the model
+// sees them and can adjust. A call that needs approval is decided first (see
+// decide). It returns an error when a step can't be saved, ctx is done, no
+// decision can be had or the tool can't be called. Then no result is saved,
+// and resume handles the call again.
 func (t *taskRun) callTool(ctx context.Context, call ToolCall) (out string, failed bool, err error) {
-	if !slices.ContainsFunc(t.tools, func(d ToolDef) bool { return d.Name == call.Name }) {
+	tool, ok := t.tool(call.Name)
+	if !ok {
 		t.log.Warn(klog.MsgToolDenied, "tool", call.Name, "call_id", call.ID)
 		return fmt.Sprintf("tool %s is not available", call.Name), true, nil
 	}
-	if t.pending[call.ID] {
+	decision, decided := t.decided[call.ID]
+	approved := decided && decision.Kind == Approved
+	if decided && decision.Kind == Rejected { // decided before a restart
+		return rejectedText(t.asked[call.ID], decision.Msg.Text), true, nil
+	}
+	if reason := t.approvalReason(call, tool); !decided && reason != "" {
+		d, err := t.decide(ctx, call, tool, reason)
+		if err != nil {
+			return "", false, err
+		}
+		if !d.Approved {
+			return rejectedText(reason, d.Message), true, nil
+		}
+		approved = true
+	}
+	switch {
+	case t.pending[call.ID] && !t.safeToRepeat(call.Name) && approved:
+		// The user approved repeating a call that may have run. A new intent
+		// uses the approval up: if this run dies too, the next one asks again.
+		if err := t.saveIntent(ctx, call, AllowedRerunApproved); err != nil {
+			return "", false, err
+		}
+		t.log.Warn(klog.MsgIntentRerun, "seq", t.seq, "tool", call.Name, "call_id", call.ID, "allowed", AllowedRerunApproved)
+		delete(t.pending, call.ID)
+	case t.pending[call.ID]:
 		// An intent without a result: the call may have run before the
 		// restart. Repeat it only if that's safe; its intent is saved already.
 		if !t.safeToRepeat(call.Name) {
 			return "", false, fmt.Errorf("%w: %s (call %s) may have run before the restart", ErrOutcomeUnknown, call.Name, call.ID)
 		}
-		t.log.Warn(klog.MsgIntentRerun, "tool", call.Name, "call_id", call.ID)
+		t.log.Warn(klog.MsgIntentRerun, "tool", call.Name, "call_id", call.ID, "allowed", AllowedRerunSafe)
 		delete(t.pending, call.ID)
-	} else {
-		// Intent before the side effect.
-		if err := t.save(ctx, Step{Kind: Intent, CallID: call.ID, Msg: Message{ToolCalls: []ToolCall{call}}}); err != nil {
-			return "", false, fmt.Errorf("save intent: %w", err)
+	default:
+		// Intent before the side effect, with why the call may run.
+		allowed := AllowedAuto + ToolClass(tool.Hints)
+		if approved {
+			allowed = AllowedApproved
 		}
-		t.log.Info(klog.MsgToolCall, "seq", t.seq, "kind", Intent, "tool", call.Name, "call_id", call.ID)
+		if err := t.saveIntent(ctx, call, allowed); err != nil {
+			return "", false, err
+		}
+		t.log.Info(klog.MsgToolCall, "seq", t.seq, "kind", Intent, "tool", call.Name, "call_id", call.ID, "allowed", allowed)
 	}
 	t.log.Debug(klog.MsgToolArgs, "seq", t.seq, "args", string(call.Args))
 	out, failed, err = t.r.Tools.Call(ctx, call)
@@ -598,6 +664,14 @@ func (t *taskRun) callTool(ctx context.Context, call ToolCall) (out string, fail
 	return out, failed, nil
 }
 
+// saveIntent saves an intent step for call; allowed says why it may run.
+func (t *taskRun) saveIntent(ctx context.Context, call ToolCall, allowed string) error {
+	if err := t.save(ctx, Step{Kind: Intent, CallID: call.ID, Msg: Message{Text: allowed, ToolCalls: []ToolCall{call}}}); err != nil {
+		return fmt.Errorf("save intent: %w", err)
+	}
+	return nil
+}
+
 // safeToRepeat reports whether the task's tool name is read-only or
 // idempotent, by the hints in the task's tools (its snapshot).
 func (t *taskRun) safeToRepeat(name string) bool {
@@ -606,10 +680,15 @@ func (t *taskRun) safeToRepeat(name string) bool {
 }
 
 // replay rebuilds the conversation from the steps saved by earlier runs.
+// Approval steps don't go into the conversation; an intent uses up the
+// call's ask and decision.
 func (t *taskRun) replay(history []Step) {
 	t.msgs = []Message{{Role: "user", Text: t.task.Goal}}
 	t.done = map[string]bool{}
 	t.pending = map[string]bool{}
+	t.asked = map[string]string{}
+	t.decided = map[string]Step{}
+	t.approvedForRun = map[string]bool{}
 	t.seq = len(history)
 	for _, s := range history {
 		switch s.Kind {
@@ -620,6 +699,13 @@ func (t *taskRun) replay(history []Step) {
 			t.last = &m
 		case Intent:
 			t.pending[s.CallID] = true
+			delete(t.asked, s.CallID)
+			delete(t.decided, s.CallID)
+		case ApprovalAsked:
+			t.asked[s.CallID] = s.Msg.Text
+			delete(t.decided, s.CallID)
+		case Approved, Rejected:
+			t.decided[s.CallID] = s
 		case ToolResult:
 			t.msgs = append(t.msgs, s.Msg)
 			t.done[s.CallID] = true
@@ -635,6 +721,22 @@ func (t *taskRun) save(ctx context.Context, s Step) error {
 	}
 	t.seq++
 	return nil
+}
+
+// progress writes one line to r.Progress, if set.
+func (t *taskRun) progress(format string, args ...any) {
+	if t.r.Progress != nil {
+		fmt.Fprintf(t.r.Progress, format+"\n", args...)
+	}
+}
+
+// cut returns s on one line, cut to at most n characters with "…".
+func cut(s string, n int) string {
+	s = strings.Join(strings.Fields(s), " ")
+	if r := []rune(s); len(r) > n {
+		return string(r[:n-1]) + "…"
+	}
+	return s
 }
 
 // since returns the time from began, rounded for the log.

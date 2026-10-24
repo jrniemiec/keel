@@ -20,8 +20,11 @@ import (
 	"path/filepath"
 	"syscall"
 
+	"github.com/mattn/go-isatty"
+
 	"github.com/jrniemiec/keel/config"
 	"github.com/jrniemiec/keel/internal/klog"
+	"github.com/jrniemiec/keel/internal/tasklock"
 	"github.com/jrniemiec/keel/mcphost"
 	"github.com/jrniemiec/keel/model"
 	"github.com/jrniemiec/keel/runner"
@@ -48,6 +51,18 @@ Commands:
          name, or --id). <task> is a task name, read
          from $KEEL_HOME/config/tasks/<task>.jsonc, or the path of a task
          config (it has a "/" or ends in .jsonc).
+         Before a call the task's approval setting says "ask" for (by
+         default writes and destructive calls), it shows the call and asks:
+           y  run it
+           a  run it, and later calls to this tool in this run
+           n  don't run it (Enter too); the model is told
+           m  don't run it, and type a message for the model
+           v  show the arguments in full, then ask again
+         A call that may have run before keel stopped (a crash) and isn't
+         safe to repeat is asked about too. Without a terminal (stdin not
+         a terminal), the task waits; keel run in a terminal asks.
+         One keel process per task: a second keel run of a running task
+         stops with an error naming the other process.
   tasks  List the tasks in the database, latest first, once. For live
          progress, use kstat -w.
   steps  Show a task's steps in order: model replies, tool calls and
@@ -82,6 +97,7 @@ Files ($KEEL_HOME, default ~/.keel):
   config/keel.jsonc           keel config: servers, db, log; one per machine
   config/tasks/<task>.jsonc   task configs, one per task
   data/keel.db                the database
+  data/locks/<task>.lock      held while a task runs; needs a local disk
   keel.log                    the log file
 Commented examples are in examples/config; install them with cp -r examples/config ~/.keel/
 
@@ -90,7 +106,7 @@ Examples:
   keel run --id n2 notes                      same task config, a new task
   keel run examples/config/tasks/notes.jsonc  a task config given by path
   keel run -d /tmp/test.db -v notes           experiment in a separate database
-  keel tasks -s waiting                       blocked tasks and why
+  keel tasks -s waiting                       tasks waiting for you, and why
   keel steps --full notes                     everything the task said and did
   keel servers --tools                        tool names for a task's allow list
 
@@ -243,6 +259,14 @@ func run(args []string) error {
 	}
 	defer db.Close()
 
+	// One process per task: a second keel run of it stops here, before
+	// starting servers.
+	unlock, err := tasklock.Lock(filepath.Join(filepath.Dir(kc.DB), "locks"), task.ID)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+
 	// Ctrl-C stops the task; it stays running and resumes on the next run.
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -254,13 +278,20 @@ func run(args []string) error {
 	defer host.Close()
 
 	r := runner.Runner{
-		Model: crashModel{model.NewLLM(llmConfigs, tc.System)},
-		Tools: crashTools{host},
-		Store: db,
+		Model:    crashModel{model.NewLLM(llmConfigs, tc.System)},
+		Tools:    crashTools{host},
+		Store:    db,
+		Progress: os.Stderr,
 	}
+	if isatty.IsTerminal(os.Stdin.Fd()) {
+		r.Approver = newTerminalApprover(os.Stdin, os.Stderr)
+	} // else a call that needs approval makes the task wait
 	res, err := r.Run(ctx, task)
 	if errors.Is(err, runner.ErrTaskChanged) {
 		return fmt.Errorf("%w; to change them, start a new task (another name, or --id)", err)
+	}
+	if errors.Is(err, runner.ErrApprovalNeeded) {
+		return fmt.Errorf("%w; run keel run %s in a terminal to answer", err, paths[0])
 	}
 	if err != nil {
 		return err

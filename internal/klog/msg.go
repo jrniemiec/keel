@@ -16,6 +16,7 @@ const (
 	MsgTaskFailed   = "task failed"
 	MsgTaskStopped  = "task stopped" // ctx cancelled; stays running, resumed later
 	MsgTaskBlocked  = "task blocked" // stopped by its environment (tools changed, server down); not failed
+	MsgTaskWaiting  = "task waiting" // a call needs approval and no one can answer now (no terminal)
 
 	// a step; entries also carry seq and kind
 	MsgModelReply  = "model reply"
@@ -24,7 +25,12 @@ const (
 	MsgToolSkipped = "tool skipped" // has a result from before a restart
 	MsgToolDenied  = "tool denied"  // not in the task's allowed tools
 	MsgToolRetry   = "tool retry"   // server down; read-only or idempotent, so called again
-	MsgIntentRerun = "intent rerun" // intent without a result from before a restart; safe, so called again
+	MsgIntentRerun = "intent rerun" // intent without a result from before a restart; safe or approved, so called again
+
+	// approvals; see local/design-notes.md, "Approvals"
+	MsgApprovalAsked = "approval asked" // reason=<class> or "outcome unknown"
+	MsgToolApproved  = "tool approved"  // for_run: approved for the rest of the run
+	MsgToolRejected  = "tool rejected"
 
 	// the task's tools (runner); see local/design-notes.md, "Tool snapshot"
 	MsgToolSnapshot = "tool snapshot" // WARN: saved late, for a task from before snapshots

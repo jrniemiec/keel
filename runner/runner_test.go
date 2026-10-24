@@ -98,8 +98,11 @@ func (m *endModel) Ask(ctx context.Context, model string, msgs []Message, tools 
 	return Message{Role: "assistant", Text: "done", Stop: StopEnd}, nil
 }
 
+// allAuto runs every call without asking.
+var allAuto = Approval{Read: ApprovalAuto, Write: ApprovalAuto, Destructive: ApprovalAuto}
+
 func newTask(allowed ...string) Task {
-	return Task{ID: "t1", Goal: "g", Model: "m", MaxSteps: 3, AllowedTools: allowed}
+	return Task{ID: "t1", Goal: "g", Model: "m", MaxSteps: 3, AllowedTools: allowed, Approval: allAuto}
 }
 
 func TestRunUnmatchedPatternSavesNothing(t *testing.T) {
@@ -364,10 +367,10 @@ func TestRunIntentWithoutResult(t *testing.T) {
 		tool       string
 		withResult bool
 		wantCalls  int
-		wantDone   bool // else blocked: ErrOutcomeUnknown, no new step, not finished
+		wantDone   bool // else waiting: no Approver, so "outcome unknown" is asked and the task waits
 	}{
 		{"read-only rerun", "fs__read_file", false, 1, true},
-		{"write blocks", "fs__write_file", false, 0, false},
+		{"write asks", "fs__write_file", false, 0, false},
 		{"with result skipped", "fs__write_file", true, 0, true},
 	}
 	for _, tt := range tests {
@@ -396,14 +399,17 @@ func TestRunIntentWithoutResult(t *testing.T) {
 				}
 				return
 			}
-			if !errors.Is(err, ErrOutcomeUnknown) {
-				t.Errorf("err = %v, want ErrOutcomeUnknown", err)
+			if !errors.Is(err, ErrApprovalNeeded) {
+				t.Errorf("err = %v, want ErrApprovalNeeded", err)
 			}
-			if len(store.steps) != saved || store.finished != "" {
-				t.Errorf("steps %d (want %d), finished %q; want nothing saved", len(store.steps), saved, store.finished)
+			if len(store.steps) != saved+1 || store.finished != "" {
+				t.Fatalf("steps %d (want %d), finished %q; want only the ask saved", len(store.steps), saved+1, store.finished)
 			}
-			if !strings.Contains(store.blocked, "fs__write_file (call c1) may have run") {
-				t.Errorf("blocked %q, want the reason", store.blocked)
+			if last := store.steps[saved]; last.Kind != ApprovalAsked || last.Msg.Text != ReasonOutcomeUnknown {
+				t.Errorf("last step = %s %q, want approval_asked %q", last.Kind, last.Msg.Text, ReasonOutcomeUnknown)
+			}
+			if !strings.Contains(store.blocked, "fs__write_file (call c1)") {
+				t.Errorf("blocked %q, want the call", store.blocked)
 			}
 		})
 	}

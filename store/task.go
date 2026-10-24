@@ -15,10 +15,14 @@ var switchable = map[string]bool{"Model": true, "Thinking": true}
 
 // checkSame returns runner.ErrTaskChanged, naming the fields that differ,
 // when task doesn't match the saved spec; switchable fields are not compared.
+// A task saved before approvals has no Approval and takes the new one.
 func checkSame(saved []byte, task runner.Task) error {
 	var old runner.Task
 	if err := json.Unmarshal(saved, &old); err != nil {
 		return fmt.Errorf("decode saved task: %w", err)
+	}
+	if old.Approval == (runner.Approval{}) {
+		old.Approval = task.Approval // saved before approvals existed
 	}
 	var diff []string
 	ov, nv := reflect.ValueOf(old), reflect.ValueOf(task)

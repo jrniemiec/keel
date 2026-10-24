@@ -150,6 +150,11 @@ func summarize(s runner.Step) delta {
 		if len(s.Msg.ToolCalls) > 0 {
 			d.current = "calling " + s.Msg.ToolCalls[0].Name
 		}
+	case runner.ApprovalAsked:
+		d.current = "waiting for approval"
+		if len(s.Msg.ToolCalls) > 0 {
+			d.current = "waiting for approval: " + s.Msg.ToolCalls[0].Name
+		}
 	case runner.ToolResult:
 		d.toolCalls = 1
 		if s.Msg.IsError {

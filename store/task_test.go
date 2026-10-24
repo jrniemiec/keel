@@ -153,3 +153,30 @@ func TestCheckSameEmptySlices(t *testing.T) {
 		t.Error(err)
 	}
 }
+
+func TestCheckSameApproval(t *testing.T) {
+	ask := runner.Approval{Read: "auto", Write: "ask", Destructive: "ask"}
+	if err := checkSame([]byte(`{"ID":"t"}`), runner.Task{ID: "t", Approval: ask}); err != nil {
+		t.Errorf("task saved before approvals: %v", err)
+	}
+	saved := []byte(`{"ID":"t","Approval":{"read":"auto","write":"ask","destructive":"ask"}}`)
+	if err := checkSame(saved, runner.Task{ID: "t", Approval: ask}); err != nil {
+		t.Errorf("same approval: %v", err)
+	}
+	auto := ask
+	auto.Destructive = "auto"
+	if err := checkSame(saved, runner.Task{ID: "t", Approval: auto}); !errors.Is(err, runner.ErrTaskChanged) || !strings.Contains(err.Error(), "Approval") {
+		t.Errorf("changed approval: err = %v, want ErrTaskChanged naming Approval", err)
+	}
+}
+
+func TestSummarizeApprovalAsked(t *testing.T) {
+	c := runner.ToolCall{ID: "c1", Name: "fs__write_file"}
+	d := summarize(runner.Step{Kind: runner.ApprovalAsked, CallID: "c1", Msg: runner.Message{Text: "destructive", ToolCalls: []runner.ToolCall{c}}})
+	if d.current != "waiting for approval: fs__write_file" || d.toolCalls != 0 {
+		t.Errorf("delta = %+v", d)
+	}
+	if d := summarize(runner.Step{Kind: runner.Approved, CallID: "c1"}); d != (delta{}) {
+		t.Errorf("approved: delta = %+v, want none", d)
+	}
+}

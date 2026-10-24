@@ -94,9 +94,27 @@ func printSteps(w io.Writer, history []runner.Step, full bool) error {
 				c := m.ToolCalls[0]
 				toolNames[s.CallID] = c.Name
 				detail = c.Name
+				if m.Text != "" {
+					detail += " (" + m.Text + ")" // why it may run, e.g. "auto: read"
+				}
 				if full {
 					below = string(c.Args)
 				}
+			}
+		case runner.ApprovalAsked, runner.Approved, runner.Rejected:
+			if len(m.ToolCalls) > 0 {
+				c := m.ToolCalls[0]
+				toolNames[s.CallID] = c.Name // a rejected call has no intent
+				detail = c.Name
+				if s.Kind == runner.ApprovalAsked && full {
+					below = string(c.Args)
+				}
+			}
+			switch {
+			case s.Kind == runner.ApprovalAsked:
+				detail += " " + m.Text // the reason
+			case m.Text != "":
+				detail += ` "` + oneLine(m.Text, width) + `"`
 			}
 		case runner.ToolResult:
 			result := "ok"

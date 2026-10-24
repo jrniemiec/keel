@@ -3,8 +3,9 @@
 // in the fs server's folder (~/.keel/demo in config/keel.jsonc). Running it
 // again after a crash resumes it; the settings below must stay the same, or
 // keel stops with an error. Only model and thinking may change, e.g. to
-// continue with another provider when one is down. model, thinking, system and max_steps may be left
-// out; they then come from "defaults" in the keel config.
+// continue with another provider when one is down. model, thinking, system,
+// max_steps and approval may be left out; they then come from "defaults" in
+// the keel config.
 {
   // The task ID; keel run --id overrides it.
   "name": "notes",
@@ -34,4 +35,8 @@
 
   // Model calls before the task fails with "step limit reached".
   "max_steps": 10,
+
+  // Per tool class, "auto" (run) or "ask" (keel run asks first). With the
+  // fs hints in the keel config, reads run and write_file asks.
+  "approval": { "read": "auto", "write": "ask", "destructive": "ask" },
 }

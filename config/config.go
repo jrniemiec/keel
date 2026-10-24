@@ -44,6 +44,7 @@ func Default() KeelConfig {
 			Thinking: false,
 			System:   "You are running a task with tools. Use the tools to do the work. When the task is done, reply with a short summary.",
 			MaxSteps: 20,
+			Approval: runner.Approval{Read: runner.ApprovalAuto, Write: runner.ApprovalAsk, Destructive: runner.ApprovalAsk},
 		},
 		Providers: Providers{
 			Anthropic: AnthropicConfig{MaxOutputTokens: 16000, Timeout: Duration(10 * time.Minute)},
@@ -77,10 +78,11 @@ type KeelConfig struct {
 
 // TaskDefaults are the values a task config gets for keys it leaves out.
 type TaskDefaults struct {
-	Model    string `json:"model"`
-	Thinking bool   `json:"thinking"`
-	System   string `json:"system"`
-	MaxSteps int    `json:"max_steps"`
+	Model    string          `json:"model"`
+	Thinking bool            `json:"thinking"`
+	System   string          `json:"system"`
+	MaxSteps int             `json:"max_steps"`
+	Approval runner.Approval `json:"approval"`
 }
 
 // ServerConfig is an MCP server that keel starts as a child process.
@@ -141,6 +143,10 @@ type TaskConfig struct {
 	Servers  []string `json:"servers"`   // from the keel config
 	Allow    []string `json:"allow"`     // tools the model may use: names or path.Match patterns, e.g. "fs__read_*"
 	MaxSteps int      `json:"max_steps"` // model calls
+	// Approval says, per tool class (read, write, destructive), whether a
+	// call runs ("auto") or keel run asks first ("ask"). Keys left out keep
+	// the keel config's defaults.
+	Approval runner.Approval `json:"approval"`
 }
 
 // Home returns keel's folder: $KEEL_HOME, or ~/.keel.
@@ -242,6 +248,9 @@ func (kc *KeelConfig) check() error {
 	if kc.LogBackups < 0 {
 		errs = append(errs, errors.New("log_backups must be >= 0"))
 	}
+	if err := kc.Defaults.Approval.Check(); err != nil {
+		errs = append(errs, fmt.Errorf("defaults: %w", err))
+	}
 	if kc.MaxToolOutput <= 0 {
 		errs = append(errs, errors.New("max_tool_output must be > 0"))
 	}
@@ -257,7 +266,7 @@ func (kc *KeelConfig) check() error {
 // LoadTaskConfig reads the task config at path, which must exist. Keys it
 // leaves out get the values in d, the keel config's defaults.
 func LoadTaskConfig(path string, d TaskDefaults) (TaskConfig, error) {
-	tc := TaskConfig{Model: d.Model, Thinking: d.Thinking, System: d.System, MaxSteps: d.MaxSteps}
+	tc := TaskConfig{Model: d.Model, Thinking: d.Thinking, System: d.System, MaxSteps: d.MaxSteps, Approval: d.Approval}
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return TaskConfig{}, fmt.Errorf("task config: %w", err)
@@ -281,6 +290,9 @@ func CheckTaskConfig(kc KeelConfig, tc TaskConfig) error {
 	}
 	if tc.MaxSteps <= 0 {
 		errs = append(errs, errors.New("max_steps must be > 0"))
+	}
+	if err := tc.Approval.Check(); err != nil {
+		errs = append(errs, err)
 	}
 	if kind, name, ok := strings.Cut(tc.Model, ":"); !ok || name == "" {
 		errs = append(errs, fmt.Errorf("model %q: want provider:model, e.g. anthropic:claude-haiku-4-5-20251001", tc.Model))
@@ -323,6 +335,7 @@ func (tc TaskConfig) RunnerTask() runner.Task {
 		AllowedTools: slices.Clone(tc.Allow),
 		Model:        tc.Model,
 		MaxSteps:     tc.MaxSteps,
+		Approval:     tc.Approval,
 		System:       tc.System,
 		Thinking:     tc.Thinking,
 	}
