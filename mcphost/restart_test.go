@@ -23,10 +23,29 @@ func TestMain(m *testing.M) {
 	os.Exit(m.Run())
 }
 
-// runTestServer serves two tools over stdio: echo returns its text, die
-// exits the process in the middle of the call.
+// runTestServer serves tools over stdio: echo returns its text, die exits
+// the process in the middle of the call, name returns KEEL_TEST_NAME (which
+// server answered), read is marked read-only and idempotent, fail returns
+// a result marked isError, and bad.name has a name the model APIs reject.
 func runTestServer() {
 	s := mcp.NewServer(&mcp.Implementation{Name: "test", Version: "1"}, nil)
+	text := func(t string) *mcp.CallToolResult {
+		return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: t}}}
+	}
+	mcp.AddTool(s, &mcp.Tool{Name: "name"}, func(ctx context.Context, req *mcp.CallToolRequest, args struct{}) (*mcp.CallToolResult, any, error) {
+		return text(os.Getenv("KEEL_TEST_NAME")), nil, nil
+	})
+	mcp.AddTool(s, &mcp.Tool{Name: "read", Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true, IdempotentHint: true}}, func(ctx context.Context, req *mcp.CallToolRequest, args struct{}) (*mcp.CallToolResult, any, error) {
+		return text("read"), nil, nil
+	})
+	mcp.AddTool(s, &mcp.Tool{Name: "fail"}, func(ctx context.Context, req *mcp.CallToolRequest, args struct{}) (*mcp.CallToolResult, any, error) {
+		res := text("no such file")
+		res.IsError = true
+		return res, nil, nil
+	})
+	mcp.AddTool(s, &mcp.Tool{Name: "bad.name"}, func(ctx context.Context, req *mcp.CallToolRequest, args struct{}) (*mcp.CallToolResult, any, error) {
+		return text("bad"), nil, nil
+	})
 	type echoArgs struct {
 		Text string `json:"text"`
 	}

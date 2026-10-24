@@ -16,6 +16,7 @@ import (
 	"regexp"
 	"slices"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/modelcontextprotocol/go-sdk/jsonrpc"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -250,7 +251,7 @@ func (h *Host) Call(ctx context.Context, call runner.ToolCall) (string, bool, er
 // text joins a result's content into the text the model sees. Text is kept;
 // other content is described in brackets. Structured content is used only
 // when there is no text, since servers should send it as text too. Text
-// longer than maxOut bytes is cut.
+// longer than maxOut bytes is cut, before a character that would be split.
 func text(res *mcp.CallToolResult, maxOut int) string {
 	var parts []string
 	hasText := false
@@ -283,7 +284,11 @@ func text(res *mcp.CallToolResult, maxOut int) string {
 	}
 	out := strings.Join(parts, "\n")
 	if len(out) > maxOut {
-		out = out[:maxOut] + fmt.Sprintf("\n[cut: %d of %d bytes shown]", maxOut, len(out))
+		cut := maxOut
+		for cut > 0 && !utf8.RuneStart(out[cut]) {
+			cut--
+		}
+		out = out[:cut] + fmt.Sprintf("\n[cut: %d of %d bytes shown]", cut, len(out))
 	}
 	return out
 }
