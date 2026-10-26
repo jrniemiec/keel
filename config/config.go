@@ -167,6 +167,10 @@ func DefaultPath() string { return filepath.Join(Home(), "config", "keel.jsonc")
 // TasksDir returns the folder for task configs, <home>/config/tasks.
 func TasksDir() string { return filepath.Join(Home(), "config", "tasks") }
 
+// ModelsPath returns the models file's path, <home>/config/models.jsonc:
+// prices and limits per model, made by keel models.
+func ModelsPath() string { return filepath.Join(Home(), "config", "models.jsonc") }
+
 // TaskConfigPath returns the path of the task config that keel run's
 // argument names: a bare name such as "notes" means <TasksDir>/notes.jsonc;
 // anything with a "/" or ending in ".jsonc" is a path, used as given.

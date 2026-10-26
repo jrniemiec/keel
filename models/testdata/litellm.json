@@ -1,0 +1,74 @@
+{
+  "sample_spec": {
+    "litellm_provider": "one of https://docs.litellm.ai/docs/providers",
+    "max_input_tokens": "max input tokens, if the provider specifies it",
+    "mode": "one of: chat, embedding, ..."
+  },
+  "claude-sonnet-4-5": {
+    "litellm_provider": "anthropic", "mode": "chat",
+    "input_cost_per_token": 3e-06, "output_cost_per_token": 1.5e-05,
+    "cache_read_input_token_cost": 3e-07,
+    "max_input_tokens": 200000, "max_output_tokens": 64000,
+    "supports_function_calling": true, "supports_reasoning": true,
+    "deprecation_date": "2026-11-30",
+    "source": "https://platform.claude.com/docs/en/about-claude/pricing"
+  },
+  "claude-haiku-4-5": {
+    "litellm_provider": "anthropic", "mode": "chat",
+    "input_cost_per_token": 1e-06, "output_cost_per_token": 5e-06,
+    "max_input_tokens": 200000, "max_output_tokens": 64000,
+    "supports_function_calling": true,
+    "source": "https://platform.claude.com/docs/en/about-claude/models/overview"
+  },
+  "claude-opus-5": {
+    "litellm_provider": "anthropic", "mode": "chat",
+    "input_cost_per_token": 5e-06, "output_cost_per_token": 2.5e-05,
+    "max_input_tokens": 1000000, "max_output_tokens": 128000,
+    "supports_function_calling": true, "supports_reasoning": true,
+    "source": "https://platform.claude.com/docs/en/about-claude/pricing"
+  },
+  "gpt-4.1": {
+    "litellm_provider": "openai", "mode": "chat",
+    "input_cost_per_token": 2e-06, "output_cost_per_token": 8e-06,
+    "max_input_tokens": 1047576, "max_output_tokens": 32768,
+    "supports_function_calling": true
+  },
+  "gpt-5-nano": {
+    "litellm_provider": "openai", "mode": "chat",
+    "input_cost_per_token": 4.9999999999999996e-08, "output_cost_per_token": 4e-07,
+    "supports_function_calling": true, "supports_reasoning": true,
+    "source": "https://developers.openai.com/api/docs/pricing"
+  },
+  "gpt-3.5-turbo-16k": {
+    "litellm_provider": "openai", "mode": "chat",
+    "input_cost_per_token": 3e-06, "output_cost_per_token": 4e-06,
+    "max_input_tokens": 16385, "max_output_tokens": 4096
+  },
+  "gpt-5-pro": {
+    "litellm_provider": "openai", "mode": "responses",
+    "input_cost_per_token": 1.5e-05, "output_cost_per_token": 0.00012
+  },
+  "text-embedding-3-small": {
+    "litellm_provider": "openai", "mode": "embedding",
+    "input_cost_per_token": 2e-08, "output_cost_per_token": 0.0
+  },
+  "ft:gpt-4o-2024-08-06": {
+    "litellm_provider": "openai", "mode": "chat",
+    "input_cost_per_token": 3.75e-06, "output_cost_per_token": 1.5e-05
+  },
+  "openai/container": {
+    "litellm_provider": "openai", "mode": "chat"
+  },
+  "gpt-no-output-price": {
+    "litellm_provider": "openai", "mode": "chat",
+    "input_cost_per_token": 1e-06
+  },
+  "anthropic.claude-sonnet-4-5": {
+    "litellm_provider": "bedrock", "mode": "chat",
+    "input_cost_per_token": 3.3e-06, "output_cost_per_token": 1.65e-05
+  },
+  "ollama/llama3": {
+    "litellm_provider": "ollama", "mode": "chat",
+    "input_cost_per_token": 0.0, "output_cost_per_token": 0.0
+  }
+}

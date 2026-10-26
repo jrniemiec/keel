@@ -19,6 +19,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"syscall"
+	"time"
 
 	"github.com/mattn/go-isatty"
 
@@ -42,6 +43,7 @@ Usage:
   keel tasks [flags]
   keel steps [flags] <task-id>
   keel servers [flags]
+  keel models [flags] [<pattern>...]
 
 Commands:
   run    Run a task, or resume it from its last saved step after a crash
@@ -73,6 +75,13 @@ Commands:
          given there. With --tools, start them
          and list their tools: the names to use in a task's allow list,
          and the hints keel uses, after the keel config's overrides.
+  models Print a models file (prices and limits per model) made from
+         LiteLLM's model list (Anthropic and OpenAI chat models) and the
+         models installed in Ollama (host in the keel config; left out,
+         with a note, when it can't be reached). Check it, then save it:
+         keel models > $KEEL_HOME/config/models.jsonc.
+         <pattern> keeps only matching models, e.g. 'anthropic:*'; a
+         pattern matching no model is an error.
 
 Flags for run:
   -c, --config <file>      use this keel config (servers, db, log) instead of $KEEL_HOME/config/keel.jsonc (KEEL_HOME default ~/.keel)
@@ -93,9 +102,15 @@ Flags for servers:
   -c, --config <file>      use this keel config instead of $KEEL_HOME/config/keel.jsonc
       --tools              start the servers and list their tools with hints
 
+Flags for models:
+  -c, --config <file>      use this keel config (Ollama host) instead of $KEEL_HOME/config/keel.jsonc
+      --source <url|file>  read the model list from here instead of LiteLLM's on GitHub
+      --diff               show what differs from $KEEL_HOME/config/models.jsonc instead of printing the file
+
 Files ($KEEL_HOME, default ~/.keel):
   config/keel.jsonc           keel config: servers, db, log; one per machine
   config/tasks/<task>.jsonc   task configs, one per task
+  config/models.jsonc         prices and limits per model; made by keel models
   data/keel.db                the database
   data/locks/<task>.lock      held while a task runs; needs a local disk
   keel.log                    the log file
@@ -109,6 +124,7 @@ Examples:
   keel tasks -s waiting                       tasks waiting for you, and why
   keel steps --full notes                     everything the task said and did
   keel servers --tools                        tool names for a task's allow list
+  keel models --diff 'anthropic:*'            what changed in Anthropic's prices
 
 Log file: log_file in the keel config (default ~/.keel/keel.log); follow it with tail -f.
 Watch all tasks: kstat -w.
@@ -118,7 +134,7 @@ API keys are read from the environment, never from a config file:
   Ollama models      no key
 `
 
-const usageLine = "usage: keel run [flags] <task> | keel tasks [flags] | keel steps [flags] <task-id> | keel servers [flags]\nrun 'keel -h' for help"
+const usageLine = "usage: keel run [flags] <task> | keel tasks [flags] | keel steps [flags] <task-id> | keel servers [flags] | keel models [flags] [<pattern>...]\nrun 'keel -h' for help"
 
 // usageError is a mistake on the command line: exit 2 with the usage line.
 type usageError struct{ msg string }
@@ -154,6 +170,8 @@ func dispatch(args []string) error {
 		return steps(args[1:], os.Stdout)
 	case "servers":
 		return servers(args[1:], os.Stdout)
+	case "models":
+		return modelsCmd(args[1:], os.Stdout, os.Stderr, time.Now())
 	default:
 		return usageError{fmt.Sprintf("unknown command %q", args[0])}
 	}

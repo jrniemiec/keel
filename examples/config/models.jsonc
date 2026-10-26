@@ -1,0 +1,73 @@
+// keel models file: made by keel models on 2026-10-24 from
+//   https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json
+// Prices in USD per 1M tokens; K = 1,000 tokens, M = 1,000,000.
+// Check it before saving it; keel models --diff shows what changed.
+// Providers' prices:
+//   https://developers.openai.com/api/docs/pricing
+//   https://platform.claude.com/docs/en/about-claude/pricing
+{
+  "anthropic:claude-haiku-4-5": {
+    "input_price_per_1m_tokens":  "$1.00",
+    "output_price_per_1m_tokens": "$5.00",
+    "max_output_tokens":          "64K",
+    "context_tokens":             "200K",
+    "tool_calling":               true,
+    "thinking":                   true
+  },
+  "anthropic:claude-haiku-4-5-20251001": {
+    "input_price_per_1m_tokens":  "$1.00",
+    "output_price_per_1m_tokens": "$5.00",
+    "max_output_tokens":          "64K",
+    "context_tokens":             "200K",
+    "tool_calling":               true,
+    "thinking":                   true
+  },
+  "anthropic:claude-opus-5": {
+    "input_price_per_1m_tokens":  "$5.00",
+    "output_price_per_1m_tokens": "$25.00",
+    "max_output_tokens":          "128K",
+    "context_tokens":             "1M",
+    "tool_calling":               true,
+    "thinking":                   true
+  },
+  "anthropic:claude-opus-5-5": {
+    "input_price_per_1m_tokens":  "$4.00",
+    "output_price_per_1m_tokens": "$20.00",
+    "max_output_tokens":          "128K",
+    "context_tokens":             "1M",
+    "tool_calling":               true,
+    "thinking":                   true
+  },
+  "anthropic:claude-sonnet-5": {
+    "input_price_per_1m_tokens":  "$2.00",
+    "output_price_per_1m_tokens": "$10.00",
+    "max_output_tokens":          "128K",
+    "context_tokens":             "1M",
+    "tool_calling":               true,
+    "thinking":                   true
+  },
+  "anthropic:claude-sonnet-5-5": {
+    "input_price_per_1m_tokens":  "$2.00",
+    "output_price_per_1m_tokens": "$10.00",
+    "max_output_tokens":          "128K",
+    "context_tokens":             "1M",
+    "tool_calling":               true,
+    "thinking":                   true
+  },
+  "openai:gpt-5": {
+    "input_price_per_1m_tokens":  "$1.25",
+    "output_price_per_1m_tokens": "$10.00",
+    "max_output_tokens":          "128K",
+    "context_tokens":             "272K",
+    "tool_calling":               true,
+    "thinking":                   true
+  },
+  "openai:gpt-5-mini": {
+    "input_price_per_1m_tokens":  "$0.25",
+    "output_price_per_1m_tokens": "$2.00",
+    "max_output_tokens":          "128K",
+    "context_tokens":             "272K",
+    "tool_calling":               true,
+    "thinking":                   true
+  }
+}

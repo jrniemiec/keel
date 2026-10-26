@@ -5,7 +5,7 @@ BINDIR   ?= $(HOME)/dev/bin
 INSTALL  := $(BINDIR)/$(BINARY)
 LDFLAGS  ?= -X main.version=$(VERSION)
 
-.PHONY: build install config run test fmt vet lint clean dist release
+.PHONY: build install config models run test fmt vet lint clean dist release
 
 build:
 	@mkdir -p bin
@@ -22,6 +22,13 @@ config: ## Copy local/config to ~/.keel/config, for experimenting with settings 
 	@test -d local/config || { echo "no local/config; start with: cp -R examples/config local/"; exit 1; }
 	@mkdir -p $(HOME)/.keel/config
 	cp -R local/config/. $(HOME)/.keel/config/
+
+models: build ## Write local/config/models.jsonc with keel models, and show what differs from ~/.keel/config; install with make config (usage: make models [MODELS="'anthropic:*' 'ollama:*'"])
+	@mkdir -p local/config
+	bin/$(BINARY) models $(MODELS) > local/config/models.jsonc.tmp
+	mv local/config/models.jsonc.tmp local/config/models.jsonc
+	@echo "Wrote local/config/models.jsonc; check it, then make config"
+	@if [ -f $(HOME)/.keel/config/models.jsonc ]; then echo "Differences from ~/.keel/config/models.jsonc:"; bin/$(BINARY) models --diff $(MODELS); fi
 
 run: build
 	bin/$(BINARY)
