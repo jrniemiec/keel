@@ -2,8 +2,11 @@ package model
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"math"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/jrniemiec/llm"
@@ -134,5 +137,27 @@ func TestToTurnsGroupsResults(t *testing.T) {
 	}
 	if r := turns[4].Results; len(r) != 1 || r[0].CallID != "c" {
 		t.Errorf("turn 4 results = %+v, want c only", r)
+	}
+}
+
+// errProvider fails every tool call with err.
+type errProvider struct {
+	fakeProvider
+	err error
+}
+
+func (p errProvider) ChatTools(context.Context, string, []llm.Turn, []llm.ToolDef) (llm.ToolReply, error) {
+	return llm.ToolReply{}, p.err
+}
+
+// A full Ollama context is a limit: the task waits until the window is raised.
+func TestAskContextFull(t *testing.T) {
+	m := NewLLM(nil, "", nil)
+	m.newProvider = func(llm.ProviderConfig) (llm.Provider, error) {
+		return errProvider{err: fmt.Errorf("ollama: %w: request (8022 tokens) exceeds", llm.ErrContextFull)}, nil
+	}
+	_, err := m.Ask(context.Background(), "ollama:qwen", []runner.Message{{Role: "user", Text: "q"}}, nil)
+	if !errors.Is(err, runner.ErrLimitReached) || !strings.Contains(err.Error(), "max_context_tokens") {
+		t.Errorf("err = %v, want ErrLimitReached naming max_context_tokens", err)
 	}
 }

@@ -8,8 +8,8 @@ github.com/google/jsonschema-go v0.4.3 h1:/DBOLZTfDow7pe2GmaJNhltueGTtDKICi8V8p+
 github.com/google/jsonschema-go v0.4.3/go.mod h1:r5quNTdLOYEz95Ru18zA0ydNbBuYoo9tgaYcxEYhJVE=
 github.com/google/uuid v1.6.0 h1:NIvaJDMOsjHA8n1jAhLSgzrAzy1Hgr+hNrb57e+94F0=
 github.com/google/uuid v1.6.0/go.mod h1:TIyPZe4MgqvfeYDBFedMoGGpEw/LqOeaOT+nhxU+yHo=
-github.com/jrniemiec/llm v0.3.0 h1:hnfvKojpteebT/bXPgZML6X1+DvlAWYuxhzN6/NO8Ws=
-github.com/jrniemiec/llm v0.3.0/go.mod h1:sqTkf5Fuh6dzQe5pBoeo4hADcAwyLZO2zfZwiRRmuKw=
+github.com/jrniemiec/llm v0.4.0 h1:RdhL5WdgmfSZUtid5iDI6rov61am9P1O+6Pkc9m52CM=
+github.com/jrniemiec/llm v0.4.0/go.mod h1:sqTkf5Fuh6dzQe5pBoeo4hADcAwyLZO2zfZwiRRmuKw=
 github.com/mattn/go-isatty v0.0.20 h1:xfD0iDuEKnDkl03q4limB+vH+GxLEtL/jb4xVJSWWEY=
 github.com/mattn/go-isatty v0.0.20/go.mod h1:W+V8PltTTMOvKvAeJH7IuucS94S2C6jfK/D7dTCTo3Y=
 github.com/modelcontextprotocol/go-sdk v1.8.0 h1:KIvahhYqwtbeniWVPs3TcXEA7b8jEtwfBpOTAI+Urx4=

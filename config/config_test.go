@@ -173,12 +173,12 @@ func TestLLMConfigs(t *testing.T) {
 	t.Setenv("KEEL_ANTHROPIC_API_KEY", "")
 	t.Setenv("ANTHROPIC_API_KEY", "")
 	tc := TaskConfig{Model: "anthropic:claude-x", Thinking: true}
-	if _, err := (KeelConfig{}).LLMConfigs(tc); err == nil || !strings.Contains(err.Error(), "set ANTHROPIC_API_KEY (or KEEL_ANTHROPIC_API_KEY)") {
+	if _, err := (KeelConfig{}).LLMConfigs(tc, models.Model{}); err == nil || !strings.Contains(err.Error(), "set ANTHROPIC_API_KEY (or KEEL_ANTHROPIC_API_KEY)") {
 		t.Errorf("err = %v, want missing key", err)
 	}
 
 	t.Setenv("ANTHROPIC_API_KEY", "std")
-	cfgs, err := (KeelConfig{}).LLMConfigs(tc)
+	cfgs, err := (KeelConfig{}).LLMConfigs(tc, models.Model{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -187,14 +187,24 @@ func TestLLMConfigs(t *testing.T) {
 	}
 
 	t.Setenv("KEEL_ANTHROPIC_API_KEY", "keel")
-	cfgs, err = (KeelConfig{}).LLMConfigs(tc)
+	cfgs, err = (KeelConfig{}).LLMConfigs(tc, models.Model{})
 	if err != nil || cfgs["anthropic"].APIKey != "keel" {
 		t.Errorf("key = %q, %v; want KEEL_ANTHROPIC_API_KEY to win", cfgs["anthropic"].APIKey, err)
 	}
 
-	cfgs, err = (KeelConfig{}).LLMConfigs(TaskConfig{Model: "ollama:qwen3.5:9b", Thinking: true})
-	if err != nil || !cfgs["ollama"].Think {
-		t.Errorf("ollama = %+v, %v; want Think and no key needed", cfgs["ollama"], err)
+	kc := Default()
+	qwen := TaskConfig{Model: "ollama:qwen3.5:9b", Thinking: true}
+	cfgs, err = kc.LLMConfigs(qwen, models.Model{ContextTokens: 262_144})
+	if c := cfgs["ollama"]; err != nil || !c.Think || c.NumCtx != 32768 || !c.NoTruncate {
+		t.Errorf("ollama = %+v, %v; want Think, no key needed, num_ctx capped at 32768, no truncation", c, err)
+	}
+	cfgs, _ = kc.LLMConfigs(qwen, models.Model{ContextTokens: 8192})
+	if c := cfgs["ollama"]; c.NumCtx != 8192 {
+		t.Errorf("num_ctx = %d, want the model's 8192, under the cap", c.NumCtx)
+	}
+	cfgs, _ = kc.LLMConfigs(qwen, models.Model{})
+	if c := cfgs["ollama"]; c.NumCtx != 32768 {
+		t.Errorf("num_ctx = %d, want the cap when the model's context is unknown", c.NumCtx)
 	}
 }
 

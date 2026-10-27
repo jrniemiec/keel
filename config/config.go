@@ -50,7 +50,7 @@ func Default() KeelConfig {
 		},
 		Providers: Providers{
 			Anthropic: AnthropicConfig{MaxOutputTokens: 16000, Timeout: Duration(10 * time.Minute)},
-			Ollama:    OllamaConfig{Host: "http://localhost:11434"},
+			Ollama:    OllamaConfig{Host: "http://localhost:11434", MaxContextTokens: 32768},
 		},
 	}
 }
@@ -115,6 +115,10 @@ type AnthropicConfig struct {
 // OllamaConfig holds Ollama's settings.
 type OllamaConfig struct {
 	Host string `json:"host"`
+	// MaxContextTokens caps the context window keel asks for (num_ctx): the
+	// model's context_tokens in the models file, at most this. A larger
+	// window takes more memory. Ollama's own default is often 4096.
+	MaxContextTokens int `json:"max_context_tokens"`
 }
 
 // Duration is a time.Duration written as a string, e.g. "10m" or "90s".
@@ -246,6 +250,9 @@ func (kc *KeelConfig) check() error {
 				errs = append(errs, fmt.Errorf("server %q: hints[%d]: no hint set", name, i))
 			}
 		}
+	}
+	if kc.Providers.Ollama.MaxContextTokens <= 0 {
+		errs = append(errs, errors.New("providers.ollama.max_context_tokens must be > 0"))
 	}
 	if _, ok := klog.ParseLevel(kc.LogLevel); !ok {
 		errs = append(errs, fmt.Errorf("log_level %q: want debug, info, warn or error", kc.LogLevel))
@@ -396,8 +403,10 @@ func (kc KeelConfig) MCPServers(names []string) []mcphost.Server {
 // LLMConfigs returns the provider settings for tc's model, for
 // model.NewLLM, with the API key the provider needs read from the
 // environment. It fails when the key isn't set, so the task doesn't start
-// without it.
-func (kc KeelConfig) LLMConfigs(tc TaskConfig) (map[string]llm.ProviderConfig, error) {
+// without it. m is the model's entry in the models file: for Ollama, its
+// context_tokens, capped by max_context_tokens, is the window asked for, and
+// a prompt longer than that is an error, not cut.
+func (kc KeelConfig) LLMConfigs(tc TaskConfig, m models.Model) (map[string]llm.ProviderConfig, error) {
 	kind, _, _ := strings.Cut(tc.Model, ":")
 	var cfg llm.ProviderConfig
 	switch kind {
@@ -406,6 +415,11 @@ func (kc KeelConfig) LLMConfigs(tc TaskConfig) (map[string]llm.ProviderConfig, e
 		cfg.Timeout = time.Duration(kc.Providers.Anthropic.Timeout)
 	case "ollama":
 		cfg.Host = kc.Providers.Ollama.Host
+		cfg.NumCtx = kc.Providers.Ollama.MaxContextTokens
+		if m.ContextTokens > 0 {
+			cfg.NumCtx = min(cfg.NumCtx, int(m.ContextTokens))
+		}
+		cfg.NoTruncate = true
 	}
 
 	if keyEnv := providers[kind]; keyEnv != "" {

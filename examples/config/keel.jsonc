@@ -96,6 +96,13 @@
     },
     "ollama": {
       "host": "http://localhost:11434",
+
+      // The most context (num_ctx) keel asks for: the model's
+      // context_tokens in models.jsonc, at most this. A larger window takes
+      // more memory. Without it Ollama often uses 4096 and quietly drops the
+      // oldest messages; keel asks Ollama to refuse instead, and the task
+      // waits until this is raised.
+      "max_context_tokens": 32768,
     },
   },
 }

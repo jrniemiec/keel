@@ -3,6 +3,7 @@ package model
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -62,6 +63,11 @@ func (m *LLM) Ask(ctx context.Context, model string, msgs []runner.Message, tool
 	defs := toToolDefs(tools)
 
 	reply, err := m.chat(ctx, providerKey{name: model}, turns, defs)
+	if errors.Is(err, llm.ErrContextFull) {
+		// Asked again with a larger window, the same history fits.
+		return runner.Message{}, fmt.Errorf("%w: context of %s full; raise providers.ollama.max_context_tokens in the keel config: %w",
+			runner.ErrLimitReached, model, err)
+	}
 	if err != nil {
 		return runner.Message{}, err
 	}

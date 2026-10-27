@@ -3,7 +3,7 @@ module github.com/jrniemiec/keel
 go 1.26.0
 
 require (
-	github.com/jrniemiec/llm v0.3.0
+	github.com/jrniemiec/llm v0.4.0
 	github.com/mattn/go-isatty v0.0.20
 	github.com/modelcontextprotocol/go-sdk v1.8.0
 	gopkg.in/natefinch/lumberjack.v2 v2.2.1

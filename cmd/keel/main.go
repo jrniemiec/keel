@@ -58,8 +58,9 @@ Commands:
          model that costs money needs max_usd (default $1 in the keel
          config). After each model call, the progress line shows the
          reply's cost and the task's total. When the task has used up
-         max_steps or max_usd, keel exits and the task waits: raise the
-         limit in the task config and run it again.
+         max_steps or max_usd, or an Ollama model's context is full
+         (providers.ollama.max_context_tokens in the keel config), keel
+         exits and the task waits: raise the limit and run it again.
          Before a call the task's approval setting says "ask" for (by
          default writes and destructive calls), it shows the call and asks:
            y  run it
@@ -267,7 +268,7 @@ func run(args []string) error {
 	if f.db != "" {
 		kc.DB = f.db
 	}
-	llmConfigs, err := kc.LLMConfigs(tc)
+	llmConfigs, err := kc.LLMConfigs(tc, modelInfo)
 	if err != nil {
 		return err
 	}
@@ -332,7 +333,7 @@ func run(args []string) error {
 		return fmt.Errorf("%w; to change them, start a new task (another name, or --id)", err)
 	}
 	if errors.Is(err, runner.ErrLimitReached) {
-		return fmt.Errorf("%w; the task waits: raise max_steps or max_usd in the task config, then keel run %s again", err, paths[0])
+		return fmt.Errorf("%w; the task waits: raise that limit, then keel run %s again", err, paths[0])
 	}
 	if errors.Is(err, runner.ErrApprovalNeeded) {
 		return fmt.Errorf("%w; run keel run %s in a terminal to answer", err, paths[0])
