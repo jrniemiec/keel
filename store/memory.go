@@ -28,7 +28,7 @@ func NewMemory() runner.Store {
 }
 
 // StartTask implements runner.Store: a resumed task must match its first run,
-// except for the model and thinking, which are saved.
+// except for the model, thinking and limits, which are saved.
 func (ss *Memory) StartTask(ctx context.Context, task runner.Task) error {
 	if saved, ok := ss.specs[task.ID]; ok {
 		if err := checkSame(saved, task); err != nil {

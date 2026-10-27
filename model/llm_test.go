@@ -2,11 +2,13 @@ package model
 
 import (
 	"context"
+	"math"
 	"slices"
 	"testing"
 
 	"github.com/jrniemiec/llm"
 
+	"github.com/jrniemiec/keel/models"
 	"github.com/jrniemiec/keel/runner"
 )
 
@@ -29,14 +31,17 @@ func (p fakeProvider) ChatTools(context.Context, string, []llm.Turn, []llm.ToolD
 	*p.calls = append(*p.calls, p.limit)
 	stop := (*p.stops)[0]
 	*p.stops = (*p.stops)[1:]
-	return llm.ToolReply{Turn: llm.Turn{Role: llm.RoleAssistant, Text: "x"}, Stop: stop}, nil
+	return llm.ToolReply{Turn: llm.Turn{Role: llm.RoleAssistant, Text: "x"}, Stop: stop,
+		Usage: llm.Usage{InputTokens: 1000, OutputTokens: 100}}, nil
 }
 
 // newFakeLLM returns an LLM whose providers reply with stops in order, and the
 // output limits they were called with.
 func newFakeLLM(configs map[string]llm.ProviderConfig, stops ...string) (*LLM, *[]int) {
 	var calls []int
-	m := NewLLM(configs, "")
+	m := NewLLM(configs, "", models.Models{
+		"anthropic:claude-test": {InputPrice: 3, OutputPrice: 15},
+	})
 	m.newProvider = func(cfg llm.ProviderConfig) (llm.Provider, error) {
 		return fakeProvider{limit: cfg.MaxOutputTokens, stops: &stops, calls: &calls}, nil
 	}
@@ -62,6 +67,21 @@ func TestAskRetriesCutOffWithLargerLimit(t *testing.T) {
 	}
 	if want := []int{16000, 32000}; !slices.Equal(*calls, want) {
 		t.Errorf("limits = %v, want %v", *calls, want)
+	}
+}
+
+// A reply's USD comes from its tokens and the model's prices; a cut-off
+// reply asked again costs both calls. A model without prices costs 0.
+func TestAskSetsUSD(t *testing.T) {
+	m, _ := newFakeLLM(nil, llm.StopEnd, llm.StopMaxTokens, llm.StopEnd, llm.StopEnd)
+	if got := ask(t, m, "anthropic:claude-test").USD; math.Abs(got-0.0045) > 1e-12 {
+		t.Errorf("USD = %v, want 0.0045 (1000 in at $3, 100 out at $15 per 1M)", got)
+	}
+	if got := ask(t, m, "anthropic:claude-test").USD; math.Abs(got-0.009) > 1e-12 {
+		t.Errorf("retried: USD = %v, want 0.009", got)
+	}
+	if got := ask(t, m, "ollama:free").USD; got != 0 {
+		t.Errorf("no prices: USD = %v, want 0", got)
 	}
 }
 

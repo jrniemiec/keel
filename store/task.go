@@ -10,8 +10,9 @@ import (
 )
 
 // switchable are the Task fields a resume may change: a task can continue
-// with another model, e.g. when its provider is down.
-var switchable = map[string]bool{"Model": true, "Thinking": true}
+// with another model, e.g. when its provider is down, and with a higher
+// limit after it used one up.
+var switchable = map[string]bool{"Model": true, "Thinking": true, "MaxSteps": true, "MaxUSD": true}
 
 // checkSame returns runner.ErrTaskChanged, naming the fields that differ,
 // when task doesn't match the saved spec; switchable fields are not compared.

@@ -34,8 +34,12 @@
     // The system prompt: how the model should work. The goal is separate.
     "system": "You are running a task with tools. Use the tools to do the work. When the task is done, reply with a short summary.",
 
-    // Model calls before the task fails with "step limit reached".
+    // Limits: model calls, and money spent in USD (earlier runs included).
+    // When one is used up, keel exits and the task waits; raise it in the
+    // task config and run it again. A model that costs money (see
+    // models.jsonc, made by make models) needs max_usd > 0.
     "max_steps": 20,
+    "max_usd": 1.0,
 
     // Per tool class: "auto" runs the call, "ask" makes keel run ask first
     // (y/a/n/m at the prompt; without a terminal the task waits for the next

@@ -10,6 +10,7 @@ import (
 	"github.com/jrniemiec/llm"
 
 	"github.com/jrniemiec/keel/internal/klog"
+	"github.com/jrniemiec/keel/models"
 	"github.com/jrniemiec/keel/runner"
 )
 
@@ -17,12 +18,16 @@ import (
 // "provider:model", e.g. "anthropic:claude-sonnet-5", "openai:gpt-5" or
 // "ollama:qwen3.5:9b". A provider is created on first use and reused.
 //
+// Each reply's USD comes from its tokens and the model's prices in the
+// models file; a model not in it costs 0 (keel run checks it is there).
+//
 // A reply cut off at the output limit is asked again once with double the
 // limit (Anthropic only), so the runner never sees the cut-off one. If that is
 // cut off too, it's returned and the runner fails the task.
 type LLM struct {
 	configs     map[string]llm.ProviderConfig // per provider: API key, thinking, …; Model is set per task
 	system      string
+	models      models.Models                                  // prices, by provider:model
 	newProvider func(llm.ProviderConfig) (llm.Provider, error) // llm.New; replaced in tests
 
 	mu        sync.Mutex
@@ -37,11 +42,12 @@ type providerKey struct {
 // NewLLM returns an LLM. configs holds the settings for each provider name
 // ("anthropic", "openai", "ollama"), from the keel config; a provider without
 // an entry gets llm's defaults. system is the system prompt for every
-// request; it may be empty.
-func NewLLM(configs map[string]llm.ProviderConfig, system string) *LLM {
+// request; it may be empty. ms gives the prices.
+func NewLLM(configs map[string]llm.ProviderConfig, system string, ms models.Models) *LLM {
 	return &LLM{
 		configs:     configs,
 		system:      system,
+		models:      ms,
 		newProvider: llm.New,
 		providers:   map[providerKey]llm.ToolProvider{},
 	}
@@ -69,7 +75,9 @@ func (m *LLM) Ask(ctx context.Context, model string, msgs []runner.Message, tool
 		reply.Usage.InputTokens += first.InputTokens
 		reply.Usage.OutputTokens += first.OutputTokens
 	}
-	return fromReply(reply), nil
+	msg := fromReply(reply)
+	msg.USD = m.models[model].Cost(msg.TokensIn, msg.TokensOut)
+	return msg, nil
 }
 
 func (m *LLM) chat(ctx context.Context, key providerKey, turns []llm.Turn, tools []llm.ToolDef) (llm.ToolReply, error) {

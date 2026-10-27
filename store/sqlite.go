@@ -39,7 +39,8 @@ func (sl *SQLite) Close() error { return sl.conn.Close() }
 
 // StartTask implements runner.Store: it adds the task's row, or on resume
 // marks it running again. A resumed task must match the saved spec, else
-// runner.ErrTaskChanged; its model and thinking may change and are saved.
+// runner.ErrTaskChanged; its model, thinking and limits may change and are
+// saved.
 func (sl *SQLite) StartTask(ctx context.Context, task runner.Task) error {
 	spec, err := json.Marshal(task)
 	if err != nil {
@@ -114,12 +115,13 @@ func (sl *SQLite) Append(ctx context.Context, taskID string, s runner.Step) (err
 			model_calls = model_calls + ?, tool_calls = tool_calls + ?,
 			tool_errors = tool_errors + ?,
 			tokens_in = tokens_in + ?, tokens_out = tokens_out + ?,
+			cost_usd = cost_usd + ?,
 			current = COALESCE(NULLIF(?, ''), current),
 			last_error = COALESCE(NULLIF(?, ''), last_error),
 			updated_at = ?
 		WHERE id = ?`,
 		&sqlitex.ExecOptions{Args: []any{
-			d.modelCalls, d.toolCalls, d.toolErrors, d.tokensIn, d.tokensOut,
+			d.modelCalls, d.toolCalls, d.toolErrors, d.tokensIn, d.tokensOut, d.usd,
 			d.current, d.lastError, at, taskID,
 		}})
 	if err != nil {
@@ -132,6 +134,7 @@ func (sl *SQLite) Append(ctx context.Context, taskID string, s runner.Step) (err
 type delta struct {
 	modelCalls, toolCalls, toolErrors int
 	tokensIn, tokensOut               int
+	usd                               float64
 	current                           string // "" = unchanged
 	lastError                         string // "" = unchanged
 }
@@ -142,6 +145,7 @@ func summarize(s runner.Step) delta {
 	case runner.ModelReply:
 		d.modelCalls = 1
 		d.tokensIn, d.tokensOut = s.Msg.TokensIn, s.Msg.TokensOut
+		d.usd = s.Msg.USD
 		if len(s.Msg.ToolCalls) > 0 {
 			d.current = "running tools"
 		}
@@ -315,7 +319,7 @@ CREATE TABLE IF NOT EXISTS tasks (
 	tool_errors INTEGER NOT NULL DEFAULT 0, -- results with IsError
 	tokens_in   INTEGER NOT NULL DEFAULT 0,
 	tokens_out  INTEGER NOT NULL DEFAULT 0,
-	cost_usd    REAL    NOT NULL DEFAULT 0, -- 0 until cost accounting
+	cost_usd    REAL    NOT NULL DEFAULT 0, -- sum of the model replies' USD
 	current     TEXT,                       -- e.g. "calling read_file", "asking anthropic:claude-sonnet-5"
 	last_error  TEXT,                       -- why it failed, or the last failed tool call
 	result      TEXT                        -- the final answer, when done

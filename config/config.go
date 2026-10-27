@@ -27,6 +27,7 @@ import (
 	"github.com/jrniemiec/keel/internal/jsonc"
 	"github.com/jrniemiec/keel/internal/klog"
 	"github.com/jrniemiec/keel/mcphost"
+	"github.com/jrniemiec/keel/models"
 	"github.com/jrniemiec/keel/runner"
 )
 
@@ -44,6 +45,7 @@ func Default() KeelConfig {
 			Thinking: false,
 			System:   "You are running a task with tools. Use the tools to do the work. When the task is done, reply with a short summary.",
 			MaxSteps: 20,
+			MaxUSD:   1,
 			Approval: runner.Approval{Read: runner.ApprovalAuto, Write: runner.ApprovalAsk, Destructive: runner.ApprovalAsk},
 		},
 		Providers: Providers{
@@ -82,6 +84,7 @@ type TaskDefaults struct {
 	Thinking bool            `json:"thinking"`
 	System   string          `json:"system"`
 	MaxSteps int             `json:"max_steps"`
+	MaxUSD   float64         `json:"max_usd"`
 	Approval runner.Approval `json:"approval"`
 }
 
@@ -143,6 +146,7 @@ type TaskConfig struct {
 	Servers  []string `json:"servers"`   // from the keel config
 	Allow    []string `json:"allow"`     // tools the model may use: names or path.Match patterns, e.g. "fs__read_*"
 	MaxSteps int      `json:"max_steps"` // model calls
+	MaxUSD   float64  `json:"max_usd"`   // spending limit; a paid model needs one
 	// Approval says, per tool class (read, write, destructive), whether a
 	// call runs ("auto") or keel run asks first ("ask"). Keys left out keep
 	// the keel config's defaults.
@@ -270,7 +274,7 @@ func (kc *KeelConfig) check() error {
 // LoadTaskConfig reads the task config at path, which must exist. Keys it
 // leaves out get the values in d, the keel config's defaults.
 func LoadTaskConfig(path string, d TaskDefaults) (TaskConfig, error) {
-	tc := TaskConfig{Model: d.Model, Thinking: d.Thinking, System: d.System, MaxSteps: d.MaxSteps, Approval: d.Approval}
+	tc := TaskConfig{Model: d.Model, Thinking: d.Thinking, System: d.System, MaxSteps: d.MaxSteps, MaxUSD: d.MaxUSD, Approval: d.Approval}
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return TaskConfig{}, fmt.Errorf("task config: %w", err)
@@ -294,6 +298,9 @@ func CheckTaskConfig(kc KeelConfig, tc TaskConfig) error {
 	}
 	if tc.MaxSteps <= 0 {
 		errs = append(errs, errors.New("max_steps must be > 0"))
+	}
+	if tc.MaxUSD < 0 {
+		errs = append(errs, errors.New("max_usd must be >= 0"))
 	}
 	if err := tc.Approval.Check(); err != nil {
 		errs = append(errs, err)
@@ -331,6 +338,31 @@ func CheckTaskConfig(kc KeelConfig, tc TaskConfig) error {
 	return nil
 }
 
+// CheckModel checks tc's model against the models file ms (at path, for
+// the messages): the model must be in it, so keel knows whether it costs
+// money; a paid one needs max_usd; it must have tool calling, and thinking
+// if tc asks for it. It returns the model's entry, and all problems at once.
+func CheckModel(tc TaskConfig, ms models.Models, path string) (models.Model, error) {
+	m, ok := ms[tc.Model]
+	if !ok {
+		return models.Model{}, fmt.Errorf("task %s: model %s is not in %s; add it with make models (or keel models)", tc.Name, tc.Model, path)
+	}
+	var errs []error
+	if m.Paid() && tc.MaxUSD <= 0 {
+		errs = append(errs, fmt.Errorf("model %s costs money: set max_usd > 0", tc.Model))
+	}
+	if !m.ToolCalling {
+		errs = append(errs, fmt.Errorf("model %s has no tool calling", tc.Model))
+	}
+	if tc.Thinking && !m.Thinking {
+		errs = append(errs, fmt.Errorf("model %s has no thinking: set thinking to false", tc.Model))
+	}
+	if len(errs) > 0 {
+		return m, fmt.Errorf("task %s: %w", tc.Name, errors.Join(errs...))
+	}
+	return m, nil
+}
+
 // RunnerTask returns the task for the runner. Its ID is the task's name.
 func (tc TaskConfig) RunnerTask() runner.Task {
 	return runner.Task{
@@ -339,6 +371,7 @@ func (tc TaskConfig) RunnerTask() runner.Task {
 		AllowedTools: slices.Clone(tc.Allow),
 		Model:        tc.Model,
 		MaxSteps:     tc.MaxSteps,
+		MaxUSD:       tc.MaxUSD,
 		Approval:     tc.Approval,
 		System:       tc.System,
 		Thinking:     tc.Thinking,

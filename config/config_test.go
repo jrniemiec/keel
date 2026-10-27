@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/jrniemiec/keel/models"
 	"github.com/jrniemiec/keel/runner"
 )
 
@@ -91,16 +92,16 @@ func TestLoadKeelConfigErrors(t *testing.T) {
 }
 
 func TestLoadTaskConfig(t *testing.T) {
-	d := TaskDefaults{Model: "ollama:m", Thinking: true, System: "s", MaxSteps: 7, Approval: Default().Defaults.Approval}
+	d := TaskDefaults{Model: "ollama:m", Thinking: true, System: "s", MaxSteps: 7, MaxUSD: 1, Approval: Default().Defaults.Approval}
 	tc, err := LoadTaskConfig(write(t, "notes.jsonc", `{"name": "t1", "goal": "g", "servers": ["fs"], "allow": ["fs__read_file"]}`), d)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if tc.Model != d.Model || !tc.Thinking || tc.System != d.System || tc.MaxSteps != d.MaxSteps {
+	if tc.Model != d.Model || !tc.Thinking || tc.System != d.System || tc.MaxSteps != d.MaxSteps || tc.MaxUSD != d.MaxUSD {
 		t.Errorf("got %+v, want the defaults %+v", tc, d)
 	}
-	tc, err = LoadTaskConfig(write(t, "notes.jsonc", `{"name": "t1", "thinking": false, "max_steps": 3}`), d)
-	if err != nil || tc.Thinking || tc.MaxSteps != 3 {
+	tc, err = LoadTaskConfig(write(t, "notes.jsonc", `{"name": "t1", "thinking": false, "max_steps": 3, "max_usd": 2.5}`), d)
+	if err != nil || tc.Thinking || tc.MaxSteps != 3 || tc.MaxUSD != 2.5 {
 		t.Errorf("got %+v, %v; want the file's values over the defaults", tc, err)
 	}
 	if tc.Approval != d.Approval {
@@ -108,7 +109,7 @@ func TestLoadTaskConfig(t *testing.T) {
 	}
 	tc.Allow = []string{"fs__read_file"}
 	task := tc.RunnerTask()
-	if task.ID != "t1" || task.Model != d.Model || task.AllowedTools[0] != "fs__read_file" {
+	if task.ID != "t1" || task.Model != d.Model || task.AllowedTools[0] != "fs__read_file" || task.MaxUSD != 2.5 {
 		t.Errorf("RunnerTask = %+v", task)
 	}
 
@@ -142,6 +143,7 @@ func TestCheckTaskConfig(t *testing.T) {
 		{"no name", func(tc *TaskConfig) { tc.Name = "" }, "name is empty"},
 		{"no goal", func(tc *TaskConfig) { tc.Goal = "" }, "goal is empty"},
 		{"max steps", func(tc *TaskConfig) { tc.MaxSteps = 0 }, "max_steps"},
+		{"negative max_usd", func(tc *TaskConfig) { tc.MaxUSD = -1 }, "max_usd must be >= 0"},
 		{"model without provider", func(tc *TaskConfig) { tc.Model = "claude" }, "want provider:model"},
 		{"unknown provider", func(tc *TaskConfig) { tc.Model = "gemini:pro" }, `provider "gemini"`},
 		{"no servers", func(tc *TaskConfig) { tc.Servers = nil; tc.Allow = nil }, "servers is empty"},
@@ -239,6 +241,38 @@ func TestTaskConfigPath(t *testing.T) {
 	for arg, want := range tests {
 		if got := TaskConfigPath(arg); got != want {
 			t.Errorf("TaskConfigPath(%q) = %q, want %q", arg, got, want)
+		}
+	}
+}
+
+func TestCheckModel(t *testing.T) {
+	ms := models.Models{
+		"anthropic:paid":  {InputPrice: 1, OutputPrice: 5, ToolCalling: true, Thinking: true},
+		"ollama:free":     {ToolCalling: true},
+		"ollama:no-tools": {},
+	}
+	tc := TaskConfig{Name: "t1", Model: "anthropic:paid", MaxUSD: 1}
+	if _, err := CheckModel(tc, ms, "models.jsonc"); err != nil {
+		t.Errorf("paid model with max_usd: %v", err)
+	}
+	free := TaskConfig{Name: "t1", Model: "ollama:free"}
+	if _, err := CheckModel(free, ms, "models.jsonc"); err != nil {
+		t.Errorf("free model without max_usd: %v", err)
+	}
+	for _, tt := range []struct {
+		name    string
+		change  func(*TaskConfig)
+		wantErr string
+	}{
+		{"not in the file", func(tc *TaskConfig) { tc.Model = "openai:new" }, "model openai:new is not in models.jsonc; add it with make models"},
+		{"paid without max_usd", func(tc *TaskConfig) { tc.MaxUSD = 0 }, "model anthropic:paid costs money: set max_usd > 0"},
+		{"no tool calling", func(tc *TaskConfig) { tc.Model = "ollama:no-tools" }, "model ollama:no-tools has no tool calling"},
+		{"no thinking", func(tc *TaskConfig) { tc.Model, tc.Thinking = "ollama:free", true }, "model ollama:free has no thinking"},
+	} {
+		bad := tc
+		tt.change(&bad)
+		if _, err := CheckModel(bad, ms, "models.jsonc"); err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+			t.Errorf("%s: err = %v, want %q", tt.name, err, tt.wantErr)
 		}
 	}
 }

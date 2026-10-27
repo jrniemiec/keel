@@ -28,6 +28,7 @@ import (
 	"github.com/jrniemiec/keel/internal/tasklock"
 	"github.com/jrniemiec/keel/mcphost"
 	"github.com/jrniemiec/keel/model"
+	"github.com/jrniemiec/keel/models"
 	"github.com/jrniemiec/keel/runner"
 	"github.com/jrniemiec/keel/store"
 )
@@ -49,10 +50,16 @@ Commands:
   run    Run a task, or resume it from its last saved step after a crash
          or Ctrl-C. A done task prints its saved answer. Between runs
          only model and thinking may change (e.g. another provider when
-         one is down); for other new settings, start a new task (another
-         name, or --id). <task> is a task name, read
-         from $KEEL_HOME/config/tasks/<task>.jsonc, or the path of a task
-         config (it has a "/" or ends in .jsonc).
+         one is down), and max_steps and max_usd may be raised; for other
+         new settings, start a new task (another name, or --id). <task>
+         is a task name, read from $KEEL_HOME/config/tasks/<task>.jsonc,
+         or the path of a task config (it has a "/" or ends in .jsonc).
+         The task's model must be in the models file (make models); a
+         model that costs money needs max_usd (default $1 in the keel
+         config). After each model call, the progress line shows the
+         reply's cost and the task's total. When the task has used up
+         max_steps or max_usd, keel exits and the task waits: raise the
+         limit in the task config and run it again.
          Before a call the task's approval setting says "ask" for (by
          default writes and destructive calls), it shows the call and asks:
            y  run it
@@ -245,6 +252,18 @@ func run(args []string) error {
 	if err := config.CheckTaskConfig(kc, tc); err != nil {
 		return err
 	}
+	modelsPath := config.ModelsPath()
+	ms, err := models.Load(modelsPath)
+	if errors.Is(err, fs.ErrNotExist) {
+		return fmt.Errorf("no models file at %s: make one with make models (or keel models > %s)", modelsPath, modelsPath)
+	}
+	if err != nil {
+		return err
+	}
+	modelInfo, err := config.CheckModel(tc, ms, modelsPath)
+	if err != nil {
+		return err
+	}
 	if f.db != "" {
 		kc.DB = f.db
 	}
@@ -267,6 +286,10 @@ func run(args []string) error {
 	}
 	klog.Init(kc.LogFile, level, f.verbose, kc.LogMaxMB, kc.LogBackups)
 	klog.Info(klog.MsgStarted, "version", version, "db", kc.DB, "task", task.ID, "model", task.Model)
+	if retires, err := time.Parse(time.DateOnly, modelInfo.RetiresOn); err == nil && time.Until(retires) < 30*24*time.Hour {
+		klog.Warn(klog.MsgModelRetires, "model", task.Model, "retires_on", modelInfo.RetiresOn)
+		fmt.Fprintf(os.Stderr, "keel: warning: model %s retires on %s\n", task.Model, modelInfo.RetiresOn)
+	}
 
 	if err := os.MkdirAll(filepath.Dir(kc.DB), 0o755); err != nil {
 		return err
@@ -296,7 +319,7 @@ func run(args []string) error {
 	defer host.Close()
 
 	r := runner.Runner{
-		Model:    crashModel{model.NewLLM(llmConfigs, tc.System)},
+		Model:    crashModel{model.NewLLM(llmConfigs, tc.System, ms)},
 		Tools:    crashTools{host},
 		Store:    db,
 		Progress: os.Stderr,
@@ -308,12 +331,19 @@ func run(args []string) error {
 	if errors.Is(err, runner.ErrTaskChanged) {
 		return fmt.Errorf("%w; to change them, start a new task (another name, or --id)", err)
 	}
+	if errors.Is(err, runner.ErrLimitReached) {
+		return fmt.Errorf("%w; the task waits: raise max_steps or max_usd in the task config, then keel run %s again", err, paths[0])
+	}
 	if errors.Is(err, runner.ErrApprovalNeeded) {
 		return fmt.Errorf("%w; run keel run %s in a terminal to answer", err, paths[0])
 	}
 	if err != nil {
 		return err
 	}
-	fmt.Printf("answer: %s (%d model calls)\n", res.Text, res.Steps)
+	if res.USD > 0 {
+		fmt.Printf("answer: %s (%d model calls, $%.3f)\n", res.Text, res.Steps, res.USD)
+	} else {
+		fmt.Printf("answer: %s (%d model calls)\n", res.Text, res.Steps)
+	}
 	return nil
 }

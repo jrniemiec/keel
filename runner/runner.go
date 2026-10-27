@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"path"
 	"reflect"
 	"slices"
@@ -79,13 +80,15 @@ type Runner struct {
 
 // Task represents a task to be executed by the Runner. The Store saves it on
 // the first run; a resume must bring the same settings (ErrTaskChanged),
-// except Model and Thinking, which may change between runs.
+// except Model and Thinking, which may change between runs, and the limits
+// MaxSteps and MaxUSD, which may be raised to continue (ErrLimitReached).
 type Task struct {
 	ID           string
 	Goal         string   // instructions for the model
 	AllowedTools []string // tool names or path.Match patterns, e.g. "fs__read_*"
 	Model        string   // e.g. "anthropic:claude-sonnet-5"
 	MaxSteps     int
+	MaxUSD       float64  // spending limit, earlier runs included; 0 = none
 	Approval     Approval // per tool class: "auto" or "ask"
 
 	// Not used by the runner: the Model is set up with them (one task per
@@ -114,6 +117,7 @@ type Message struct {
 	RawFrom   string          // the provider that produced Raw, e.g. "anthropic"
 	TokensIn  int             // input tokens the reply cost, retries included
 	TokensOut int             // output tokens, thinking included
+	USD       float64         // what the reply cost; 0 for a free model
 	Model     string          // the Task.Model that gave the reply; set by the Runner
 }
 
@@ -140,10 +144,15 @@ var ErrTaskChanged = errors.New("task settings differ from its first run")
 // The task is not started; it stays as it was.
 var ErrToolsChanged = errors.New("tools changed since the task started")
 
+// ErrLimitReached is returned by Run when a task has used up its MaxSteps
+// or MaxUSD. The task waits: raise the limit and run it again to continue.
+var ErrLimitReached = errors.New("limit reached")
+
 // Result is the outcome of a finished task.
 type Result struct {
 	Text   string        // the model's final answer
 	Steps  int           // model calls made
+	USD    float64       // spent, earlier runs included
 	Waited time.Duration // time this run spent waiting for approvals
 }
 
@@ -213,7 +222,8 @@ type Store interface {
 //
 // Every reply, intent and tool result is appended to r.Store first, so a
 // restarted Run resumes from the log instead of starting over.
-// It stops when the model is done or task.MaxSteps is reached.
+// It stops when the model is done, or before a model call when task.MaxSteps
+// or task.MaxUSD is used up (ErrLimitReached; the task waits).
 //
 // The task's status in r.Store ends as done or failed. If ctx is cancelled
 // (shutdown), it stays running, so the task is resumed later.
@@ -242,7 +252,7 @@ func (r *Runner) Run(ctx context.Context, task Task) (Result, error) {
 		res.Text, err = t.run(ctx)
 	}
 	if t != nil {
-		res.Steps, res.Waited = t.steps, t.waited
+		res.Steps, res.USD, res.Waited = t.steps, t.usd, t.waited
 	}
 	return r.end(ctx, log, task, true, began, res, err)
 }
@@ -251,12 +261,16 @@ func (r *Runner) Run(ctx context.Context, task Task) (Result, error) {
 // and err with the task's ID added:
 //   - done: FinishTask(TaskDone);
 //   - stopped (ctx done): no change, the task stays running;
-//   - waiting for approval (ErrApprovalNeeded): BlockTask, status TaskWaiting;
+//   - waiting for approval (ErrApprovalNeeded) or a higher limit
+//     (ErrLimitReached): BlockTask, status TaskWaiting;
 //   - blocked by its environment (see blocked): BlockTask, status TaskWaiting;
 //   - failed: FinishTask(TaskFailed) once the task is saved (started);
 //     before that nothing is saved.
 func (r *Runner) end(ctx context.Context, log *klog.Logger, task Task, started bool, began time.Time, res Result, err error) (Result, error) {
 	attrs := []any{"model_calls", res.Steps, "dur", since(began)}
+	if res.USD > 0 {
+		attrs = append(attrs, "usd", roundUSD(res.USD))
+	}
 	if res.Waited > 0 {
 		attrs = append(attrs, "waited", res.Waited.Round(time.Second))
 	}
@@ -267,7 +281,7 @@ func (r *Runner) end(ctx context.Context, log *klog.Logger, task Task, started b
 		saveErr = r.Store.FinishTask(ctx, task.ID, TaskDone, res.Text, "")
 	case ctx.Err() != nil:
 		log.Warn(klog.MsgTaskStopped, append(attrs, "err", err)...)
-	case errors.Is(err, ErrApprovalNeeded):
+	case errors.Is(err, ErrApprovalNeeded), errors.Is(err, ErrLimitReached):
 		log.Info(klog.MsgTaskWaiting, append(attrs, "reason", err)...)
 		saveErr = r.Store.BlockTask(ctx, task.ID, err.Error())
 	case blocked(err):
@@ -283,7 +297,7 @@ func (r *Runner) end(ctx context.Context, log *klog.Logger, task Task, started b
 		err = errors.Join(err, fmt.Errorf("save status: %w", saveErr))
 	}
 	if err != nil {
-		return Result{Steps: res.Steps, Waited: res.Waited}, fmt.Errorf("task %s: %w", task.ID, err)
+		return Result{Steps: res.Steps, USD: res.USD, Waited: res.Waited}, fmt.Errorf("task %s: %w", task.ID, err)
 	}
 	return res, nil
 }
@@ -308,6 +322,7 @@ type taskRun struct {
 	approvedForRun map[string]bool
 	waited         time.Duration // spent waiting for approvals
 	steps          int           // model replies so far
+	usd            float64       // spent so far, earlier runs included
 	last           *Message      // the last saved reply when Run started; nil for a new task
 	seq            int           // steps in the task's log so far; the next one is seq+1
 	log            *klog.Logger  // with task=<id>
@@ -320,6 +335,9 @@ func (r *Runner) check(task Task) error {
 	}
 	if task.MaxSteps <= 0 {
 		return errors.New("max steps must be > 0")
+	}
+	if task.MaxUSD < 0 {
+		return errors.New("max usd must be >= 0")
 	}
 	if task.Model == "" {
 		return errors.New("model must be specified")
@@ -494,7 +512,10 @@ func (t *taskRun) run(ctx context.Context) (string, error) {
 		}
 	}
 
-	for t.steps < t.task.MaxSteps {
+	for {
+		if err := t.checkLimits(); err != nil {
+			return "", err
+		}
 		reply, err := t.ask(ctx) // 1. Ask, 2. Record
 		if err != nil {
 			return "", err
@@ -509,7 +530,18 @@ func (t *taskRun) run(ctx context.Context) (string, error) {
 			return "", err
 		}
 	}
-	return "", fmt.Errorf("step limit %d reached", t.task.MaxSteps)
+}
+
+// checkLimits returns ErrLimitReached when the task has used up its steps
+// or its money. One reply may go over MaxUSD; it's checked before the next.
+func (t *taskRun) checkLimits() error {
+	if t.steps >= t.task.MaxSteps {
+		return fmt.Errorf("%w: model calls: %d of %d", ErrLimitReached, t.steps, t.task.MaxSteps)
+	}
+	if t.task.MaxUSD > 0 && t.usd >= t.task.MaxUSD {
+		return fmt.Errorf("%w: cost: $%.2f of $%.2f", ErrLimitReached, t.usd, t.task.MaxUSD)
+	}
+	return nil
 }
 
 // ends reports whether reply ends the task, and the error if it ends it
@@ -541,19 +573,24 @@ func (t *taskRun) ask(ctx context.Context) (Message, error) {
 	if err := t.save(ctx, Step{Kind: ModelReply, Msg: reply}); err != nil {
 		return Message{}, fmt.Errorf("save reply: %w", err)
 	}
+	spentBefore := t.usd
+	t.usd += reply.USD
 	t.log.Info(klog.MsgModelReply, "seq", t.seq, "kind", ModelReply, "model", t.task.Model,
 		"stop", reply.Stop, "calls", len(reply.ToolCalls),
-		"in", reply.TokensIn, "out", reply.TokensOut, "dur", since(began))
+		"in", reply.TokensIn, "out", reply.TokensOut, "usd", roundUSD(reply.USD), "dur", since(began))
+	if near := 0.8 * t.task.MaxUSD; near > 0 && spentBefore < near && t.usd >= near {
+		t.log.Warn(klog.MsgBudgetNear, "usd", roundUSD(t.usd), "max_usd", t.task.MaxUSD)
+	}
 	t.log.Debug(klog.MsgModelText, "seq", t.seq, "text", reply.Text)
 	var calls []string
 	for _, c := range reply.ToolCalls {
 		calls = append(calls, c.Name)
 	}
+	what := cmp.Or(reply.Stop, "done")
 	if len(calls) > 0 {
-		t.progress("model  %s: %s", t.task.Model, strings.Join(calls, ", "))
-	} else {
-		t.progress("model  %s: %s", t.task.Model, cmp.Or(reply.Stop, "done"))
+		what = strings.Join(calls, ", ")
 	}
+	t.progress("model  %s: %s%s", t.task.Model, what, t.costText(reply.USD))
 	t.msgs = append(t.msgs, reply)
 	t.steps++
 	return reply, nil
@@ -695,6 +732,7 @@ func (t *taskRun) replay(history []Step) {
 		case ModelReply:
 			t.msgs = append(t.msgs, s.Msg)
 			t.steps++
+			t.usd += s.Msg.USD
 			m := s.Msg
 			t.last = &m
 		case Intent:
@@ -722,6 +760,22 @@ func (t *taskRun) save(ctx context.Context, s Step) error {
 	t.seq++
 	return nil
 }
+
+// costText returns the cost part of a model's progress line, e.g.
+// "  $0.004 (total $0.031 of $1.00)"; "" while the task has cost nothing.
+func (t *taskRun) costText(usd float64) string {
+	if t.usd == 0 {
+		return ""
+	}
+	limit := ""
+	if t.task.MaxUSD > 0 {
+		limit = fmt.Sprintf(" of $%.2f", t.task.MaxUSD)
+	}
+	return fmt.Sprintf("  $%.3f (total $%.3f%s)", usd, t.usd, limit)
+}
+
+// roundUSD rounds v to millionths of a dollar, for the log.
+func roundUSD(v float64) float64 { return math.Round(v*1e6) / 1e6 }
 
 // progress writes one line to r.Progress, if set.
 func (t *taskRun) progress(format string, args ...any) {

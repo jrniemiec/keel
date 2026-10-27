@@ -32,6 +32,14 @@ type Model struct {
 	RetiresOn       string `json:"retires_on,omitempty"` // YYYY-MM-DD; "": not announced
 }
 
+// Cost returns what a reply with these token counts costs, in USD.
+func (m Model) Cost(tokensIn, tokensOut int) float64 {
+	return (float64(tokensIn)*float64(m.InputPrice) + float64(tokensOut)*float64(m.OutputPrice)) / 1e6
+}
+
+// Paid reports whether the model costs money.
+func (m Model) Paid() bool { return m.InputPrice > 0 || m.OutputPrice > 0 }
+
 // Models maps provider:model, e.g. "anthropic:claude-sonnet-5", to its entry.
 type Models map[string]Model
 

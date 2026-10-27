@@ -45,6 +45,10 @@ const (
 	// model adapter
 	MsgMaxTokensRetry = "max tokens retry"
 
+	// budgets
+	MsgBudgetNear   = "budget near limit" // WARN once, when the task's cost passes 80% of max_usd
+	MsgModelRetires = "model retires"     // WARN: the task's model retires within 30 days
+
 	// MCP servers (mcphost); entries carry server=<name>
 	MsgMCPUp          = "mcp server up"
 	MsgMCPDown        = "mcp server down"    // a call failed: the server died
