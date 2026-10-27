@@ -49,7 +49,8 @@ Usage:
 
 Commands:
   run    Run a task, or resume it from its last saved step after a crash
-         or Ctrl-C. A done task prints its saved answer. Between runs
+         or Ctrl-C. A done task prints its saved answer. The answer goes
+         to stdout; progress lines, prompts and errors go to stderr. Between runs
          only model and thinking may change (e.g. another provider when
          one is down), max_steps and max_usd may be raised, and
          max_tool_result_tokens and clear_tool_results_at_percent may
@@ -362,10 +363,13 @@ func run(args []string) error {
 	if err != nil {
 		return err
 	}
+	// Only the answer goes to stdout, so it can be redirected; the rest is
+	// for the terminal, like the progress lines.
 	if res.USD > 0 {
-		fmt.Printf("answer: %s (%d model calls, $%.3f)\n", res.Text, res.Steps, res.USD)
+		fmt.Fprintf(os.Stderr, "done   %d model calls, $%.3f\n", res.Steps, res.USD)
 	} else {
-		fmt.Printf("answer: %s (%d model calls)\n", res.Text, res.Steps)
+		fmt.Fprintf(os.Stderr, "done   %d model calls\n", res.Steps)
 	}
+	fmt.Println(res.Text)
 	return nil
 }

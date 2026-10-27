@@ -19,7 +19,7 @@ var (
 func maybeCrash(what string) {
 	calls++
 	if calls == crashAt {
-		fmt.Printf("crash before call %d (%s)\n", calls, what)
+		fmt.Fprintf(os.Stderr, "crash before call %d (%s)\n", calls, what)
 		klog.Warn(klog.MsgCrash, "call", calls, "what", what)
 		os.Exit(1)
 	}
