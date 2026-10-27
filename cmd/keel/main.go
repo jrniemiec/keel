@@ -104,6 +104,7 @@ Flags for run:
   -d, --db <file>          save steps in this database instead of the one in the keel config; e.g. for tests
   -i, --id <id>            task ID instead of the name in the task config; a new ID starts a new task, a used one resumes it
   -l, --log-level <level>  lowest level written to the log file: debug (adds model text, tool args and output), info, warn, error; overrides log_level in the keel config
+  -q, --quiet              print only the answer, prompts, warnings and errors: no progress lines, no stats
   -v, --verbose            also print the log to the terminal, including debug entries
   -h, --help               show this help
 
@@ -196,7 +197,7 @@ func dispatch(args []string) error {
 // runFlags holds keel run's flags.
 type runFlags struct {
 	config, db, id, logLevel string
-	verbose, help            bool
+	quiet, verbose, help     bool
 }
 
 // newRunFlags defines keel run's flags, each with a short and a long name.
@@ -216,6 +217,9 @@ func newRunFlags() (*flag.FlagSet, *runFlags) {
 	}
 	for _, name := range []string{"l", "log-level"} {
 		fs.StringVar(&f.logLevel, name, "", "")
+	}
+	for _, name := range []string{"q", "quiet"} {
+		fs.BoolVar(&f.quiet, name, false, "")
 	}
 	for _, name := range []string{"v", "verbose"} {
 		fs.BoolVar(&f.verbose, name, false, "")
@@ -246,6 +250,9 @@ func run(args []string) error {
 	if f.help {
 		fmt.Print(helpText)
 		return nil
+	}
+	if f.quiet && f.verbose {
+		return usageError{"--quiet and --verbose can't be used together"}
 	}
 	switch len(paths) {
 	case 0:
@@ -341,8 +348,10 @@ func run(args []string) error {
 		Model:         crashModel{model.NewLLM(llmConfigs, tc.System, ms)},
 		Tools:         crashTools{host},
 		Store:         db,
-		Progress:      os.Stderr,
 		ContextTokens: func(string) int { return window }, // one model per run
+	}
+	if !f.quiet {
+		r.Progress = os.Stderr
 	}
 	if isatty.IsTerminal(os.Stdin.Fd()) {
 		r.Approver = newTerminalApprover(os.Stdin, os.Stderr)
@@ -365,9 +374,11 @@ func run(args []string) error {
 	}
 	// Only the answer goes to stdout, so it can be redirected; the rest is
 	// for the terminal, like the progress lines.
-	if res.USD > 0 {
+	switch {
+	case f.quiet:
+	case res.USD > 0:
 		fmt.Fprintf(os.Stderr, "done   %d model calls, $%.3f\n", res.Steps, res.USD)
-	} else {
+	default:
 		fmt.Fprintf(os.Stderr, "done   %d model calls\n", res.Steps)
 	}
 	fmt.Println(res.Text)
