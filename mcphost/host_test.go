@@ -19,7 +19,7 @@ func startTestServers(t *testing.T, names ...string) *Host {
 	for _, n := range names {
 		servers = append(servers, Server{Name: n, Command: os.Args[0], Env: []string{"KEEL_TEST_SERVER=1", "KEEL_TEST_NAME=" + n}})
 	}
-	h, err := Start(context.Background(), servers, 1000)
+	h, err := Start(context.Background(), servers)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -106,35 +106,32 @@ func TestCallToolFailure(t *testing.T) {
 
 func TestText(t *testing.T) {
 	tests := []struct {
-		name   string
-		res    *mcp.CallToolResult
-		maxOut int
-		want   string
+		name string
+		res  *mcp.CallToolResult
+		want string
 	}{
 		{"text joined", &mcp.CallToolResult{Content: []mcp.Content{
 			&mcp.TextContent{Text: "one"}, &mcp.TextContent{Text: "two"},
-		}}, 100, "one\ntwo"},
+		}}, "one\ntwo"},
 		{"placeholders", &mcp.CallToolResult{Content: []mcp.Content{
 			&mcp.ImageContent{MIMEType: "image/png", Data: make([]byte, 120)},
 			&mcp.AudioContent{MIMEType: "audio/wav", Data: make([]byte, 7)},
 			&mcp.ResourceLink{URI: "file:///a.txt"},
 			&mcp.EmbeddedResource{Resource: &mcp.ResourceContents{URI: "file:///b.bin"}},
-		}}, 1000, "[image image/png, 120 bytes]\n[audio audio/wav, 7 bytes]\n[resource link file:///a.txt]\n[resource file:///b.bin]"},
+		}}, "[image image/png, 120 bytes]\n[audio audio/wav, 7 bytes]\n[resource link file:///a.txt]\n[resource file:///b.bin]"},
 		{"embedded text", &mcp.CallToolResult{Content: []mcp.Content{
 			&mcp.EmbeddedResource{Resource: &mcp.ResourceContents{URI: "file:///c.txt", Text: "inside"}},
-		}}, 100, "inside"},
-		{"structured without text", &mcp.CallToolResult{StructuredContent: map[string]any{"n": 3}}, 100, `{"n":3}`},
+		}}, "inside"},
+		{"structured without text", &mcp.CallToolResult{StructuredContent: map[string]any{"n": 3}}, `{"n":3}`},
 		{"structured ignored with text", &mcp.CallToolResult{
 			Content:           []mcp.Content{&mcp.TextContent{Text: "3"}},
 			StructuredContent: map[string]any{"n": 3},
-		}, 100, "3"},
-		{"cut", &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: "abcdef"}}}, 4, "abcd\n[cut: 4 of 6 bytes shown]"},
-		// "é" is 2 bytes; cutting at 2 would split it.
-		{"cut before a split character", &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: "aéb"}}}, 2, "a\n[cut: 1 of 4 bytes shown]"},
+		}, "3"},
+		{"long text kept whole", &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: strings.Repeat("x", 100_000)}}}, strings.Repeat("x", 100_000)},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := text(tt.res, tt.maxOut); got != tt.want {
+			if got := text(tt.res); got != tt.want {
 				t.Errorf("text = %q, want %q", got, tt.want)
 			}
 		})

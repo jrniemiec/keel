@@ -65,7 +65,7 @@ func runTestServer() {
 
 func TestCallRestartsDeadServerOnce(t *testing.T) {
 	ctx := context.Background()
-	h, err := Start(ctx, []Server{{Name: "t", Command: os.Args[0], Env: []string{"KEEL_TEST_SERVER=1"}}}, 1000)
+	h, err := Start(ctx, []Server{{Name: "t", Command: os.Args[0], Env: []string{"KEEL_TEST_SERVER=1"}}})
 	if err != nil {
 		t.Fatal(err)
 	}

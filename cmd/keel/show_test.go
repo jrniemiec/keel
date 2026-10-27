@@ -138,3 +138,18 @@ func TestTasks(t *testing.T) {
 		t.Errorf("bad status: err = %v, want a usage error", err)
 	}
 }
+
+func TestStepsResultsCleared(t *testing.T) {
+	call := runner.ToolCall{ID: "c1", Name: "fs__read_file", Args: json.RawMessage(`{}`)}
+	history := []runner.Step{
+		{Kind: runner.Intent, CallID: "c1", Msg: runner.Message{ToolCalls: []runner.ToolCall{call}}},
+		{Kind: runner.ResultsCleared, CallID: "c1", Msg: runner.Message{Text: "12 tool results, ~40K tokens"}},
+	}
+	var out strings.Builder
+	if err := printSteps(&out, history, false); err != nil {
+		t.Fatal(err)
+	}
+	if want := "results_cleared  12 tool results, ~40K tokens, through fs__read_file"; !strings.Contains(out.String(), want) {
+		t.Errorf("got:\n%s\nwant a line with %q", out.String(), want)
+	}
+}

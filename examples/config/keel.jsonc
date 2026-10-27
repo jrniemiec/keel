@@ -19,10 +19,6 @@
   "log_max_mb": 50,
   "log_backups": 2,
 
-  // Bytes of one tool result the model sees; the rest is cut, so a large
-  // file read can't fill the model's context.
-  "max_tool_output": 65536,
-
   // Values a task config gets for the keys it leaves out.
   "defaults": {
     // provider:model; the provider is anthropic, openai or ollama.
@@ -40,6 +36,16 @@
     // models.jsonc, made by make models) needs max_usd > 0.
     "max_steps": 20,
     "max_usd": 1.0,
+
+    // What the model sees of the history; the database keeps it whole.
+    // max_tool_result_tokens: a longer tool result is cut, with a note;
+    // 0 = no cap. clear_tool_results_at_percent: when the history passes
+    // this percent of the model's context window (context_tokens in
+    // models.jsonc; for Ollama the window keel asks for), the oldest tool
+    // results of read tools are cleared, down to 20 points below; the last
+    // 5 are kept. 0 = never.
+    "max_tool_result_tokens": 0,
+    "clear_tool_results_at_percent": 70,
 
     // Per tool class: "auto" runs the call, "ask" makes keel run ask first
     // (y/a/n/m at the prompt; without a terminal the task waits for the next

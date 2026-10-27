@@ -18,6 +18,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -50,17 +51,23 @@ Commands:
   run    Run a task, or resume it from its last saved step after a crash
          or Ctrl-C. A done task prints its saved answer. Between runs
          only model and thinking may change (e.g. another provider when
-         one is down), and max_steps and max_usd may be raised; for other
-         new settings, start a new task (another name, or --id). <task>
+         one is down), max_steps and max_usd may be raised, and
+         max_tool_result_tokens and clear_tool_results_at_percent may
+         change; for other new settings, start a new task (another
+         name, or --id). <task>
          is a task name, read from $KEEL_HOME/config/tasks/<task>.jsonc,
          or the path of a task config (it has a "/" or ends in .jsonc).
          The task's model must be in the models file (make models); a
          model that costs money needs max_usd (default $1 in the keel
          config). After each model call, the progress line shows the
-         reply's cost and the task's total. When the task has used up
-         max_steps or max_usd, or an Ollama model's context is full
-         (providers.ollama.max_context_tokens in the keel config), keel
-         exits and the task waits: raise the limit and run it again.
+         reply's cost and the task's total, and the size of the history
+         sent with the model's context window, e.g. "history 1.2K of
+         200K (0.6%)". Old tool results are cleared from what the model
+         sees at clear_tool_results_at_percent of the window; a tool
+         result longer than max_tool_result_tokens is cut (the database
+         keeps both whole). When the task has used up max_steps or max_usd, or
+         the model's context is full, keel exits and the task waits:
+         change the setting it names and run it again.
          Before a call the task's approval setting says "ask" for (by
          default writes and destructive calls), it shows the call and asks:
            y  run it
@@ -219,6 +226,15 @@ func newRunFlags() (*flag.FlagSet, *runFlags) {
 	return fs, f
 }
 
+// contextFullHint says what to change when model's context window is full.
+func contextFullHint(model string) string {
+	hint := "lower clear_tool_results_at_percent or set max_tool_result_tokens in the task config, or use a model with a larger context window"
+	if strings.HasPrefix(model, "ollama:") {
+		hint += ", or raise providers.ollama.max_context_tokens in the keel config"
+	}
+	return hint
+}
+
 // run is "keel run": it starts or resumes the task in a task config.
 func run(args []string) error {
 	flags, f := newRunFlags()
@@ -313,17 +329,19 @@ func run(args []string) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	host, err := mcphost.Start(ctx, kc.MCPServers(tc.Servers), kc.MaxToolOutput)
+	host, err := mcphost.Start(ctx, kc.MCPServers(tc.Servers))
 	if err != nil {
 		return err
 	}
 	defer host.Close()
 
+	window := kc.ContextTokens(task.Model, modelInfo)
 	r := runner.Runner{
-		Model:    crashModel{model.NewLLM(llmConfigs, tc.System, ms)},
-		Tools:    crashTools{host},
-		Store:    db,
-		Progress: os.Stderr,
+		Model:         crashModel{model.NewLLM(llmConfigs, tc.System, ms)},
+		Tools:         crashTools{host},
+		Store:         db,
+		Progress:      os.Stderr,
+		ContextTokens: func(string) int { return window }, // one model per run
 	}
 	if isatty.IsTerminal(os.Stdin.Fd()) {
 		r.Approver = newTerminalApprover(os.Stdin, os.Stderr)
@@ -331,6 +349,9 @@ func run(args []string) error {
 	res, err := r.Run(ctx, task)
 	if errors.Is(err, runner.ErrTaskChanged) {
 		return fmt.Errorf("%w; to change them, start a new task (another name, or --id)", err)
+	}
+	if errors.Is(err, runner.ErrContextFull) {
+		return fmt.Errorf("%w; the task waits: %s, then keel run %s again", err, contextFullHint(task.Model), paths[0])
 	}
 	if errors.Is(err, runner.ErrLimitReached) {
 		return fmt.Errorf("%w; the task waits: raise that limit, then keel run %s again", err, paths[0])

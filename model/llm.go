@@ -25,6 +25,9 @@ import (
 // A reply cut off at the output limit is asked again once with double the
 // limit (Anthropic only), so the runner never sees the cut-off one. If that is
 // cut off too, it's returned and the runner fails the task.
+//
+// A prompt longer than the model's context window is runner.ErrContextFull:
+// the task waits.
 type LLM struct {
 	configs     map[string]llm.ProviderConfig // per provider: API key, thinking, …; Model is set per task
 	system      string
@@ -64,17 +67,19 @@ func (m *LLM) Ask(ctx context.Context, model string, msgs []runner.Message, tool
 
 	reply, err := m.chat(ctx, providerKey{name: model}, turns, defs)
 	if errors.Is(err, llm.ErrContextFull) {
-		// Asked again with a larger window, the same history fits.
-		return runner.Message{}, fmt.Errorf("%w: context of %s full; raise providers.ollama.max_context_tokens in the keel config: %w",
-			runner.ErrLimitReached, model, err)
+		return runner.Message{}, fmt.Errorf("%w: %s: %w", runner.ErrContextFull, model, err)
 	}
 	if err != nil {
 		return runner.Message{}, err
 	}
+	promptTokens := reply.Usage.InputTokens
 	if reply.Stop == llm.StopMaxTokens && strings.HasPrefix(model, "anthropic:") {
 		klog.Warn(klog.MsgMaxTokensRetry, "model", model, "out", reply.Usage.OutputTokens)
 		first := reply.Usage
 		reply, err = m.chat(ctx, providerKey{name: model, larger: true}, turns, defs)
+		if errors.Is(err, llm.ErrContextFull) { // the larger limit doesn't fit
+			return runner.Message{}, fmt.Errorf("%w: %s: retry with a larger output limit: %w", runner.ErrContextFull, model, err)
+		}
 		if err != nil {
 			return runner.Message{}, fmt.Errorf("retry with a larger output limit: %w", err)
 		}
@@ -82,6 +87,7 @@ func (m *LLM) Ask(ctx context.Context, model string, msgs []runner.Message, tool
 		reply.Usage.OutputTokens += first.OutputTokens
 	}
 	msg := fromReply(reply)
+	msg.PromptTokens = promptTokens
 	msg.USD = m.models[model].Cost(msg.TokensIn, msg.TokensOut)
 	return msg, nil
 }
@@ -188,6 +194,8 @@ func stop(s string) string {
 		return runner.StopMaxTokens
 	case llm.StopRefusal:
 		return runner.StopRefusal
+	case llm.StopContextFull:
+		return runner.StopContextFull
 	default:
 		return s
 	}

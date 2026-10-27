@@ -45,6 +45,13 @@ func TestStartTaskChanged(t *testing.T) {
 				t.Fatalf("resume with higher limits: %v", err)
 			}
 
+			otherContext := task
+			otherContext.MaxToolResultTokens = 20_000
+			otherContext.ClearToolResultsAtPercent = 50
+			if err := st.StartTask(ctx, otherContext); err != nil {
+				t.Fatalf("resume with other context settings: %v", err)
+			}
+
 			changed := task
 			changed.Goal = "g2"
 			changed.System = "s2"

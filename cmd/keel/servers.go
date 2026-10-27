@@ -69,7 +69,7 @@ func servers(args []string, w io.Writer) error {
 	level, _ := klog.ParseLevel(kc.LogLevel)
 	klog.Init(kc.LogFile, level, false, kc.LogMaxMB, kc.LogBackups)
 	ctx := context.Background()
-	host, err := mcphost.Start(ctx, kc.MCPServers(names), kc.MaxToolOutput)
+	host, err := mcphost.Start(ctx, kc.MCPServers(names))
 	if err != nil {
 		return err
 	}

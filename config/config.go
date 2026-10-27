@@ -34,19 +34,21 @@ import (
 // Default returns the keel config used for every key a file leaves out.
 func Default() KeelConfig {
 	return KeelConfig{
-		DB:            filepath.Join(Home(), "data", "keel.db"),
-		LogFile:       filepath.Join(Home(), "keel.log"),
-		LogLevel:      "info",
-		LogMaxMB:      50,
-		LogBackups:    2,
-		MaxToolOutput: 64 << 10,
+		DB:         filepath.Join(Home(), "data", "keel.db"),
+		LogFile:    filepath.Join(Home(), "keel.log"),
+		LogLevel:   "info",
+		LogMaxMB:   50,
+		LogBackups: 2,
 		Defaults: TaskDefaults{
 			Model:    "anthropic:claude-haiku-4-5-20251001",
 			Thinking: false,
 			System:   "You are running a task with tools. Use the tools to do the work. When the task is done, reply with a short summary.",
 			MaxSteps: 20,
 			MaxUSD:   1,
-			Approval: runner.Approval{Read: runner.ApprovalAuto, Write: runner.ApprovalAsk, Destructive: runner.ApprovalAsk},
+			// no cap: cutting depends on the task; clearing old results is
+			// almost lossless, so on
+			ClearToolResultsAtPercent: 70,
+			Approval:                  runner.Approval{Read: runner.ApprovalAuto, Write: runner.ApprovalAsk, Destructive: runner.ApprovalAsk},
 		},
 		Providers: Providers{
 			Anthropic: AnthropicConfig{MaxOutputTokens: 16000, Timeout: Duration(10 * time.Minute)},
@@ -67,15 +69,14 @@ var providers = map[string]string{
 
 // KeelConfig is the keel config, by default ~/.keel/config/keel.jsonc.
 type KeelConfig struct {
-	DB            string                  `json:"db"`              // SQLite file with every task's step log
-	LogFile       string                  `json:"log_file"`        // progress log, appended
-	LogLevel      string                  `json:"log_level"`       // lowest level in the log file; keel run -l overrides it
-	LogMaxMB      int                     `json:"log_max_mb"`      // the log file is rotated at this size
-	LogBackups    int                     `json:"log_backups"`     // rotated log files kept
-	MaxToolOutput int                     `json:"max_tool_output"` // bytes of one tool result the model sees; the rest is cut
-	Defaults      TaskDefaults            `json:"defaults"`        // for keys a task config leaves out
-	Servers       map[string]ServerConfig `json:"servers"`         // MCP servers by name, e.g. "fs"
-	Providers     Providers               `json:"providers"`
+	DB         string                  `json:"db"`          // SQLite file with every task's step log
+	LogFile    string                  `json:"log_file"`    // progress log, appended
+	LogLevel   string                  `json:"log_level"`   // lowest level in the log file; keel run -l overrides it
+	LogMaxMB   int                     `json:"log_max_mb"`  // the log file is rotated at this size
+	LogBackups int                     `json:"log_backups"` // rotated log files kept
+	Defaults   TaskDefaults            `json:"defaults"`    // for keys a task config leaves out
+	Servers    map[string]ServerConfig `json:"servers"`     // MCP servers by name, e.g. "fs"
+	Providers  Providers               `json:"providers"`
 }
 
 // TaskDefaults are the values a task config gets for keys it leaves out.
@@ -86,6 +87,9 @@ type TaskDefaults struct {
 	MaxSteps int             `json:"max_steps"`
 	MaxUSD   float64         `json:"max_usd"`
 	Approval runner.Approval `json:"approval"`
+
+	MaxToolResultTokens       int `json:"max_tool_result_tokens"`
+	ClearToolResultsAtPercent int `json:"clear_tool_results_at_percent"`
 }
 
 // ServerConfig is an MCP server that keel starts as a child process.
@@ -151,6 +155,13 @@ type TaskConfig struct {
 	Allow    []string `json:"allow"`     // tools the model may use: names or path.Match patterns, e.g. "fs__read_*"
 	MaxSteps int      `json:"max_steps"` // model calls
 	MaxUSD   float64  `json:"max_usd"`   // spending limit; a paid model needs one
+	// MaxToolResultTokens cuts a longer tool result in what the model sees;
+	// 0 = no cap. The database keeps it whole.
+	MaxToolResultTokens int `json:"max_tool_result_tokens"`
+	// ClearToolResultsAtPercent: when the history passes this percent of the
+	// model's context window, the oldest tool results are cleared from what
+	// the model sees, down to 20 points below; 0 = never.
+	ClearToolResultsAtPercent int `json:"clear_tool_results_at_percent"`
 	// Approval says, per tool class (read, write, destructive), whether a
 	// call runs ("auto") or keel run asks first ("ask"). Keys left out keep
 	// the keel config's defaults.
@@ -266,8 +277,8 @@ func (kc *KeelConfig) check() error {
 	if err := kc.Defaults.Approval.Check(); err != nil {
 		errs = append(errs, fmt.Errorf("defaults: %w", err))
 	}
-	if kc.MaxToolOutput <= 0 {
-		errs = append(errs, errors.New("max_tool_output must be > 0"))
+	for _, err := range checkContextSettings(kc.Defaults.MaxToolResultTokens, kc.Defaults.ClearToolResultsAtPercent) {
+		errs = append(errs, fmt.Errorf("defaults: %w", err))
 	}
 	if kc.Providers.Anthropic.MaxOutputTokens <= 0 {
 		errs = append(errs, errors.New("providers.anthropic.max_output_tokens must be > 0"))
@@ -281,7 +292,10 @@ func (kc *KeelConfig) check() error {
 // LoadTaskConfig reads the task config at path, which must exist. Keys it
 // leaves out get the values in d, the keel config's defaults.
 func LoadTaskConfig(path string, d TaskDefaults) (TaskConfig, error) {
-	tc := TaskConfig{Model: d.Model, Thinking: d.Thinking, System: d.System, MaxSteps: d.MaxSteps, MaxUSD: d.MaxUSD, Approval: d.Approval}
+	tc := TaskConfig{
+		Model: d.Model, Thinking: d.Thinking, System: d.System, MaxSteps: d.MaxSteps, MaxUSD: d.MaxUSD, Approval: d.Approval,
+		MaxToolResultTokens: d.MaxToolResultTokens, ClearToolResultsAtPercent: d.ClearToolResultsAtPercent,
+	}
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return TaskConfig{}, fmt.Errorf("task config: %w", err)
@@ -312,6 +326,7 @@ func CheckTaskConfig(kc KeelConfig, tc TaskConfig) error {
 	if err := tc.Approval.Check(); err != nil {
 		errs = append(errs, err)
 	}
+	errs = append(errs, checkContextSettings(tc.MaxToolResultTokens, tc.ClearToolResultsAtPercent)...)
 	if kind, name, ok := strings.Cut(tc.Model, ":"); !ok || name == "" {
 		errs = append(errs, fmt.Errorf("model %q: want provider:model, e.g. anthropic:claude-haiku-4-5-20251001", tc.Model))
 	} else if _, ok := providers[kind]; !ok {
@@ -343,6 +358,19 @@ func CheckTaskConfig(kc KeelConfig, tc TaskConfig) error {
 		return fmt.Errorf("task %s: %w", tc.Name, errors.Join(errs...))
 	}
 	return nil
+}
+
+// checkContextSettings checks max_tool_result_tokens and
+// clear_tool_results_at_percent.
+func checkContextSettings(maxToolResultTokens, clearAtPercent int) []error {
+	var errs []error
+	if maxToolResultTokens < 0 {
+		errs = append(errs, errors.New("max_tool_result_tokens must be >= 0"))
+	}
+	if clearAtPercent < 0 || clearAtPercent > 100 {
+		errs = append(errs, errors.New("clear_tool_results_at_percent must be 0 to 100"))
+	}
+	return errs
 }
 
 // CheckModel checks tc's model against the models file ms (at path, for
@@ -380,8 +408,11 @@ func (tc TaskConfig) RunnerTask() runner.Task {
 		MaxSteps:     tc.MaxSteps,
 		MaxUSD:       tc.MaxUSD,
 		Approval:     tc.Approval,
-		System:       tc.System,
-		Thinking:     tc.Thinking,
+
+		MaxToolResultTokens:       tc.MaxToolResultTokens,
+		ClearToolResultsAtPercent: tc.ClearToolResultsAtPercent,
+		System:                    tc.System,
+		Thinking:                  tc.Thinking,
 	}
 }
 
@@ -415,10 +446,7 @@ func (kc KeelConfig) LLMConfigs(tc TaskConfig, m models.Model) (map[string]llm.P
 		cfg.Timeout = time.Duration(kc.Providers.Anthropic.Timeout)
 	case "ollama":
 		cfg.Host = kc.Providers.Ollama.Host
-		cfg.NumCtx = kc.Providers.Ollama.MaxContextTokens
-		if m.ContextTokens > 0 {
-			cfg.NumCtx = min(cfg.NumCtx, int(m.ContextTokens))
-		}
+		cfg.NumCtx = kc.ContextTokens(tc.Model, m)
 		cfg.NoTruncate = true
 	}
 
@@ -440,6 +468,21 @@ func (kc KeelConfig) LLMConfigs(tc TaskConfig, m models.Model) (map[string]llm.P
 		}
 	}
 	return map[string]llm.ProviderConfig{kind: cfg}, nil
+}
+
+// ContextTokens returns model's context window in tokens; 0 = unknown. m is
+// its entry in the models file. For Ollama it is the window keel asks for:
+// m's context_tokens, at most providers.ollama.max_context_tokens; that cap
+// when unknown.
+func (kc KeelConfig) ContextTokens(model string, m models.Model) int {
+	n := int(m.ContextTokens)
+	if strings.HasPrefix(model, "ollama:") {
+		limit := kc.Providers.Ollama.MaxContextTokens
+		if n == 0 || n > limit {
+			n = limit
+		}
+	}
+	return n
 }
 
 // ExpandHome replaces a leading "~" in path with the user's home folder.

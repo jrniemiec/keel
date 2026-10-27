@@ -73,7 +73,9 @@ func TestLoadKeelConfigErrors(t *testing.T) {
 		{"bad log level", `{"log_level": "loud"}`, `log_level "loud"`},
 		{"bad timeout", `{"providers": {"anthropic": {"timeout": "soon"}}}`, `duration "soon"`},
 		{"timeout as a number", `{"providers": {"anthropic": {"timeout": 600}}}`, `want a string such as "10m"`},
-		{"no tool output", `{"max_tool_output": 0}`, "max_tool_output must be > 0"},
+		{"old tool output cap", `{"max_tool_output": 65536}`, `unknown field "max_tool_output"`},
+		{"bad default tool result cap", `{"defaults": {"max_tool_result_tokens": -1}}`, "defaults: max_tool_result_tokens must be >= 0"},
+		{"bad default clear percent", `{"defaults": {"clear_tool_results_at_percent": 101}}`, "defaults: clear_tool_results_at_percent must be 0 to 100"},
 		{"no keys in config", `{"providers": {"anthropic": {"api_key_env": "X"}}}`, `unknown field "api_key_env"`},
 		{"hint bad pattern", `{"servers": {"fs": {"command": "x", "hints": [{"tools": "read_[", "read_only": true}]}}}`, `hints[0]: tools "read_["`},
 		{"hint no tools", `{"servers": {"fs": {"command": "x", "hints": [{"read_only": true}]}}}`, `hints[0]: tools ""`},
@@ -92,16 +94,19 @@ func TestLoadKeelConfigErrors(t *testing.T) {
 }
 
 func TestLoadTaskConfig(t *testing.T) {
-	d := TaskDefaults{Model: "ollama:m", Thinking: true, System: "s", MaxSteps: 7, MaxUSD: 1, Approval: Default().Defaults.Approval}
+	d := TaskDefaults{Model: "ollama:m", Thinking: true, System: "s", MaxSteps: 7, MaxUSD: 1, Approval: Default().Defaults.Approval,
+		MaxToolResultTokens: 5000, ClearToolResultsAtPercent: 70}
 	tc, err := LoadTaskConfig(write(t, "notes.jsonc", `{"name": "t1", "goal": "g", "servers": ["fs"], "allow": ["fs__read_file"]}`), d)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if tc.Model != d.Model || !tc.Thinking || tc.System != d.System || tc.MaxSteps != d.MaxSteps || tc.MaxUSD != d.MaxUSD {
+	if tc.Model != d.Model || !tc.Thinking || tc.System != d.System || tc.MaxSteps != d.MaxSteps || tc.MaxUSD != d.MaxUSD ||
+		tc.MaxToolResultTokens != 5000 || tc.ClearToolResultsAtPercent != 70 {
 		t.Errorf("got %+v, want the defaults %+v", tc, d)
 	}
-	tc, err = LoadTaskConfig(write(t, "notes.jsonc", `{"name": "t1", "thinking": false, "max_steps": 3, "max_usd": 2.5}`), d)
-	if err != nil || tc.Thinking || tc.MaxSteps != 3 || tc.MaxUSD != 2.5 {
+	tc, err = LoadTaskConfig(write(t, "notes.jsonc", `{"name": "t1", "thinking": false, "max_steps": 3, "max_usd": 2.5,
+		"max_tool_result_tokens": 0, "clear_tool_results_at_percent": 60}`), d)
+	if err != nil || tc.Thinking || tc.MaxSteps != 3 || tc.MaxUSD != 2.5 || tc.MaxToolResultTokens != 0 || tc.ClearToolResultsAtPercent != 60 {
 		t.Errorf("got %+v, %v; want the file's values over the defaults", tc, err)
 	}
 	if tc.Approval != d.Approval {
@@ -109,7 +114,7 @@ func TestLoadTaskConfig(t *testing.T) {
 	}
 	tc.Allow = []string{"fs__read_file"}
 	task := tc.RunnerTask()
-	if task.ID != "t1" || task.Model != d.Model || task.AllowedTools[0] != "fs__read_file" || task.MaxUSD != 2.5 {
+	if task.ID != "t1" || task.Model != d.Model || task.AllowedTools[0] != "fs__read_file" || task.MaxUSD != 2.5 || task.ClearToolResultsAtPercent != 60 {
 		t.Errorf("RunnerTask = %+v", task)
 	}
 
@@ -156,6 +161,8 @@ func TestCheckTaskConfig(t *testing.T) {
 		{"wildcard server", func(tc *TaskConfig) { tc.Allow = []string{"*__read_file"} }, `allow "*__read_file"`},
 		{"bare wildcard", func(tc *TaskConfig) { tc.Allow = []string{"*"} }, `allow "*"`},
 		{"bad approval", func(tc *TaskConfig) { tc.Approval.Write = "yes" }, `approval write "yes": want auto or ask`},
+		{"negative tool result cap", func(tc *TaskConfig) { tc.MaxToolResultTokens = -1 }, "max_tool_result_tokens must be >= 0"},
+		{"clear percent over 100", func(tc *TaskConfig) { tc.ClearToolResultsAtPercent = 150 }, "clear_tool_results_at_percent must be 0 to 100"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -205,6 +212,26 @@ func TestLLMConfigs(t *testing.T) {
 	cfgs, _ = kc.LLMConfigs(qwen, models.Model{})
 	if c := cfgs["ollama"]; c.NumCtx != 32768 {
 		t.Errorf("num_ctx = %d, want the cap when the model's context is unknown", c.NumCtx)
+	}
+}
+
+func TestContextTokens(t *testing.T) {
+	kc := Default() // Ollama cap 32768
+	tests := []struct {
+		model string
+		m     models.Model
+		want  int
+	}{
+		{"anthropic:claude-x", models.Model{ContextTokens: 200_000}, 200_000},
+		{"openai:gpt-x", models.Model{}, 0},
+		{"ollama:qwen", models.Model{ContextTokens: 262_144}, 32768},
+		{"ollama:qwen", models.Model{ContextTokens: 8192}, 8192},
+		{"ollama:qwen", models.Model{}, 32768},
+	}
+	for _, tt := range tests {
+		if got := kc.ContextTokens(tt.model, tt.m); got != tt.want {
+			t.Errorf("ContextTokens(%s, %d) = %d, want %d", tt.model, tt.m.ContextTokens, got, tt.want)
+		}
 	}
 }
 

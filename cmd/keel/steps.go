@@ -116,6 +116,9 @@ func printSteps(w io.Writer, history []runner.Step, full bool) error {
 			case m.Text != "":
 				detail += ` "` + oneLine(m.Text, width) + `"`
 			}
+		case runner.ResultsCleared:
+			// e.g. "12 tool results, ~40K tokens, through fs__read_file"
+			detail = strings.TrimSpace(m.Text + ", through " + toolNames[s.CallID])
 		case runner.ToolResult:
 			result := "ok"
 			if m.IsError {

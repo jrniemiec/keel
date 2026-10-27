@@ -16,7 +16,6 @@ import (
 	"regexp"
 	"slices"
 	"strings"
-	"unicode/utf8"
 
 	"github.com/modelcontextprotocol/go-sdk/jsonrpc"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -87,13 +86,11 @@ type Host struct {
 	stderr    map[string]*stderrLog         // each session's stderr
 	down      map[string]bool               // died; restarted before the next call
 	restarted map[string]bool               // restarted once; a second death is final
-	maxOut    int                           // bytes of one tool result kept
 }
 
-// Start starts the servers and connects to them. maxOut caps the text of one
-// tool result, so a large file read can't fill the model's context. On error,
-// the servers already started are closed.
-func Start(ctx context.Context, servers []Server, maxOut int) (*Host, error) {
+// Start starts the servers and connects to them. On error, the servers
+// already started are closed.
+func Start(ctx context.Context, servers []Server) (*Host, error) {
 	h := &Host{
 		client:    mcp.NewClient(&mcp.Implementation{Name: "keel", Version: "dev"}, nil),
 		servers:   map[string]Server{},
@@ -101,7 +98,6 @@ func Start(ctx context.Context, servers []Server, maxOut int) (*Host, error) {
 		stderr:    map[string]*stderrLog{},
 		down:      map[string]bool{},
 		restarted: map[string]bool{},
-		maxOut:    maxOut,
 	}
 	for _, s := range servers {
 		if !validName.MatchString(s.Name) || strings.Contains(s.Name, Sep) {
@@ -245,14 +241,14 @@ func (h *Host) Call(ctx context.Context, call runner.ToolCall) (string, bool, er
 		klog.Warn(klog.MsgMCPDown, "server", server, "tool", tool, "err", err)
 		return "", false, fmt.Errorf("mcp server %s: %w: %w", server, runner.ErrServerDown, err)
 	}
-	return text(res, h.maxOut), res.IsError, nil
+	return text(res), res.IsError, nil
 }
 
 // text joins a result's content into the text the model sees. Text is kept;
 // other content is described in brackets. Structured content is used only
-// when there is no text, since servers should send it as text too. Text
-// longer than maxOut bytes is cut, before a character that would be split.
-func text(res *mcp.CallToolResult, maxOut int) string {
+// when there is no text, since servers should send it as text too. It is
+// kept whole; the runner cuts what the model sees (max_tool_result_tokens).
+func text(res *mcp.CallToolResult) string {
 	var parts []string
 	hasText := false
 	for _, c := range res.Content {
@@ -282,15 +278,7 @@ func text(res *mcp.CallToolResult, maxOut int) string {
 			parts = append(parts, string(b))
 		}
 	}
-	out := strings.Join(parts, "\n")
-	if len(out) > maxOut {
-		cut := maxOut
-		for cut > 0 && !utf8.RuneStart(out[cut]) {
-			cut--
-		}
-		out = out[:cut] + fmt.Sprintf("\n[cut: %d of %d bytes shown]", cut, len(out))
-	}
-	return out
+	return strings.Join(parts, "\n")
 }
 
 // Close ends the sessions; each server's stdin is closed, and the process is

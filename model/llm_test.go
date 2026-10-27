@@ -150,14 +150,63 @@ func (p errProvider) ChatTools(context.Context, string, []llm.Turn, []llm.ToolDe
 	return llm.ToolReply{}, p.err
 }
 
-// A full Ollama context is a limit: the task waits until the window is raised.
+// A full context, from any provider, is runner.ErrContextFull: the task
+// waits. The provider's message is kept.
 func TestAskContextFull(t *testing.T) {
-	m := NewLLM(nil, "", nil)
-	m.newProvider = func(llm.ProviderConfig) (llm.Provider, error) {
-		return errProvider{err: fmt.Errorf("ollama: %w: request (8022 tokens) exceeds", llm.ErrContextFull)}, nil
+	for _, model := range []string{"ollama:qwen", "anthropic:claude-test", "openai:gpt-test"} {
+		m := NewLLM(nil, "", nil)
+		m.newProvider = func(llm.ProviderConfig) (llm.Provider, error) {
+			return errProvider{err: fmt.Errorf("x: %w: request (8022 tokens) exceeds", llm.ErrContextFull)}, nil
+		}
+		_, err := m.Ask(context.Background(), model, []runner.Message{{Role: "user", Text: "q"}}, nil)
+		if !errors.Is(err, runner.ErrContextFull) || !errors.Is(err, runner.ErrLimitReached) || !strings.Contains(err.Error(), "request (8022 tokens) exceeds") {
+			t.Errorf("%s: err = %v, want ErrContextFull with the provider's message", model, err)
+		}
 	}
-	_, err := m.Ask(context.Background(), "ollama:qwen", []runner.Message{{Role: "user", Text: "q"}}, nil)
-	if !errors.Is(err, runner.ErrLimitReached) || !strings.Contains(err.Error(), "max_context_tokens") {
-		t.Errorf("err = %v, want ErrLimitReached naming max_context_tokens", err)
+}
+
+// A retry with the larger output limit may not fit the window.
+func TestAskRetryContextFull(t *testing.T) {
+	var calls []int
+	stops := []string{llm.StopMaxTokens}
+	m := NewLLM(map[string]llm.ProviderConfig{"anthropic": {MaxOutputTokens: 16000}}, "", nil)
+	m.newProvider = func(cfg llm.ProviderConfig) (llm.Provider, error) {
+		if cfg.MaxOutputTokens > 16000 {
+			return errProvider{err: fmt.Errorf("anthropic: %w: input length and `max_tokens` exceed context limit", llm.ErrContextFull)}, nil
+		}
+		return fakeProvider{limit: cfg.MaxOutputTokens, stops: &stops, calls: &calls}, nil
+	}
+	_, err := m.Ask(context.Background(), "anthropic:claude-test", []runner.Message{{Role: "user", Text: "q"}}, nil)
+	if !errors.Is(err, runner.ErrContextFull) {
+		t.Errorf("err = %v, want ErrContextFull", err)
+	}
+}
+
+// PromptTokens is the size of what was sent: one request's input, while
+// TokensIn counts a retry's too.
+func TestAskPromptTokens(t *testing.T) {
+	m, _ := newFakeLLM(map[string]llm.ProviderConfig{"anthropic": {MaxOutputTokens: 1000}},
+		llm.StopEnd, llm.StopMaxTokens, llm.StopEnd)
+	if r := ask(t, m, "anthropic:claude-test"); r.PromptTokens != 1000 || r.TokensIn != 1000 {
+		t.Errorf("PromptTokens, TokensIn = %d, %d; want 1000, 1000", r.PromptTokens, r.TokensIn)
+	}
+	if r := ask(t, m, "anthropic:claude-test"); r.PromptTokens != 1000 || r.TokensIn != 2000 {
+		t.Errorf("retried: PromptTokens, TokensIn = %d, %d; want 1000, 2000", r.PromptTokens, r.TokensIn)
+	}
+}
+
+func TestStop(t *testing.T) {
+	tests := map[string]string{
+		llm.StopEnd:         runner.StopEnd,
+		llm.StopToolUse:     runner.StopToolUse,
+		llm.StopMaxTokens:   runner.StopMaxTokens,
+		llm.StopRefusal:     runner.StopRefusal,
+		llm.StopContextFull: runner.StopContextFull,
+		"content_filter":    "content_filter",
+	}
+	for in, want := range tests {
+		if got := stop(in); got != want {
+			t.Errorf("stop(%q) = %q, want %q", in, got, want)
+		}
 	}
 }

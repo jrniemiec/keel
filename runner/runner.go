@@ -1,3 +1,6 @@
+// Package runner runs agent tasks: the loop between a Model and Tools, with
+// every step saved to a Store so a task resumes after a crash, and approvals
+// and limits that make a task wait.
 package runner
 
 import (
@@ -76,12 +79,17 @@ type Runner struct {
 	Approver Approver     // asks before a call the task's Approval says "ask" for; nil: the task waits
 	Progress io.Writer    // one line per model reply and tool call, for a human; nil = none
 	Logger   *klog.Logger // progress log; nil = klog.Default()
+	// ContextTokens returns a model's context window in tokens; 0 = unknown.
+	// nil: unknown for every model. Old tool results are cleared only for a
+	// known window (see Task.ClearToolResultsAtPercent).
+	ContextTokens func(model string) int
 }
 
 // Task represents a task to be executed by the Runner. The Store saves it on
 // the first run; a resume must bring the same settings (ErrTaskChanged),
-// except Model and Thinking, which may change between runs, and the limits
-// MaxSteps and MaxUSD, which may be raised to continue (ErrLimitReached).
+// except Model and Thinking, which may change between runs, the limits
+// MaxSteps and MaxUSD, which may be raised to continue (ErrLimitReached), and
+// MaxToolResultTokens and ClearToolResultsAtPercent.
 type Task struct {
 	ID           string
 	Goal         string   // instructions for the model
@@ -90,6 +98,14 @@ type Task struct {
 	MaxSteps     int
 	MaxUSD       float64  // spending limit, earlier runs included; 0 = none
 	Approval     Approval // per tool class: "auto" or "ask"
+
+	// What's sent to the model; the Store keeps the full history.
+	// MaxToolResultTokens cuts a longer tool result; 0 = no cap.
+	// ClearToolResultsAtPercent: when the history passes this percent of the
+	// model's context window, the oldest tool results are cleared down to 20
+	// points below it; 0 = never (see clearOld).
+	MaxToolResultTokens       int
+	ClearToolResultsAtPercent int
 
 	// Not used by the runner: the Model is set up with them (one task per
 	// process for now). Saved here so a resume checks them too.
@@ -119,6 +135,9 @@ type Message struct {
 	TokensOut int             // output tokens, thinking included
 	USD       float64         // what the reply cost; 0 for a free model
 	Model     string          // the Task.Model that gave the reply; set by the Runner
+	// PromptTokens is the size of the request that got the reply: its input
+	// tokens as the provider counted them, without a retry's; 0 = unknown.
+	PromptTokens int
 }
 
 // Stop reasons in Message.Stop.
@@ -127,12 +146,17 @@ const (
 	StopToolUse   = "tool_use"   // run ToolCalls
 	StopMaxTokens = "max_tokens" // cut off at the output limit; ToolCalls may be incomplete
 	StopRefusal   = "refusal"    // the model declined
+	// cut off at the end of the context window; ToolCalls may be incomplete.
+	// The reply is saved (it cost money) but left out of the conversation,
+	// and the task waits (ErrLimitReached).
+	StopContextFull = "context_full"
 )
 
 // Errors that end a task because of the model's reply.
 var (
-	ErrCutOff  = errors.New("reply cut off at the output limit")
-	ErrRefused = errors.New("model refused")
+	ErrCutOff      = errors.New("reply cut off at the output limit")
+	ErrRefused     = errors.New("model refused")
+	ErrUnknownStop = errors.New("model stopped for an unknown reason")
 )
 
 // ErrTaskChanged is returned by Store.StartTask when a resumed task's
@@ -171,6 +195,10 @@ const (
 	ApprovalAsked StepKind = "approval_asked" // a call waits for a decision; Msg.Text is the reason
 	Approved      StepKind = "approved"       // Msg.Text is "approved for this run" for an "always" answer
 	Rejected      StepKind = "rejected"       // Msg.Text is the user's message for the model
+
+	// Tool results cleared from what's sent: the clearable ones up to the
+	// one with CallID (see clearOld). Msg.Text says how many.
+	ResultsCleared StepKind = "results_cleared"
 )
 
 // Step is one entry in a task's append-only log.
@@ -326,6 +354,13 @@ type taskRun struct {
 	last           *Message      // the last saved reply when Run started; nil for a new task
 	seq            int           // steps in the task's log so far; the next one is seq+1
 	log            *klog.Logger  // with task=<id>
+
+	// context window (context.go)
+	window          int  // the model's context window in tokens; 0 = unknown
+	clearedThrough  int  // index in msgs of the last result covered by clearing; 0 = none
+	promptTokens    int  // the last reply's PromptTokens; 0 = unknown
+	promptMsgs      int  // len(msgs) when that reply was asked for
+	warnedNoneClear bool // MsgNothingToClear logged in this run
 }
 
 // check checks the runner and the task before anything is saved.
@@ -341,6 +376,12 @@ func (r *Runner) check(task Task) error {
 	}
 	if task.Model == "" {
 		return errors.New("model must be specified")
+	}
+	if task.MaxToolResultTokens < 0 {
+		return errors.New("max tool result tokens must be >= 0")
+	}
+	if p := task.ClearToolResultsAtPercent; p < 0 || p > 100 {
+		return errors.New("clear tool results at percent must be 0 to 100")
 	}
 	return task.Approval.Check()
 }
@@ -465,7 +506,7 @@ func lastToolSnapshot(history []Step) []ToolDef {
 // finished reports whether the last model reply in history ends the task.
 func finished(history []Step) bool {
 	for i := len(history) - 1; i >= 0; i-- {
-		if history[i].Kind == ModelReply {
+		if history[i].Kind == ModelReply && history[i].Msg.Stop != StopContextFull {
 			done, _ := ends(history[i].Msg)
 			return done
 		}
@@ -477,6 +518,9 @@ func finished(history []Step) bool {
 // if the task has none; tools are the task's allowed tools.
 func (r *Runner) start(ctx context.Context, task Task, history []Step, tools []ToolDef, log *klog.Logger) (*taskRun, error) {
 	t := &taskRun{r: r, task: task, tools: tools, log: log}
+	if r.ContextTokens != nil {
+		t.window = r.ContextTokens(task.Model)
+	}
 	t.replay(history)
 	if lastToolSnapshot(history) == nil {
 		if err := t.save(ctx, Step{Kind: ToolSnapshot, Tools: tools}); err != nil {
@@ -485,6 +529,9 @@ func (r *Runner) start(ctx context.Context, task Task, history []Step, tools []T
 		if len(history) > 0 {
 			log.Warn(klog.MsgToolSnapshot, "reason", "task saved before tool snapshots")
 		}
+	}
+	if t.window == 0 && task.ClearToolResultsAtPercent > 0 {
+		log.Warn(klog.MsgNoContextTokens, "model", task.Model)
 	}
 	if len(history) == 0 {
 		log.Info(klog.MsgTaskStart, "model", task.Model, "max_steps", task.MaxSteps, "tools", len(tools))
@@ -546,17 +593,21 @@ func (t *taskRun) checkLimits() error {
 
 // ends reports whether reply ends the task, and the error if it ends it
 // without an answer. A reply without Stop (e.g. from a scripted model) ends
-// the task when it has no tool calls.
+// the task when it has no tool calls. An unknown Stop ends it with an error:
+// the reply may be incomplete.
 func ends(reply Message) (bool, error) {
 	switch reply.Stop {
+	case StopEnd, StopToolUse, "":
+		return len(reply.ToolCalls) == 0, nil
 	case StopMaxTokens:
 		// The Model already retried with a larger limit (local/max-tokens.md).
 		// ToolCalls may be incomplete, so never run them.
 		return true, ErrCutOff
 	case StopRefusal:
 		return true, fmt.Errorf("%w: %s", ErrRefused, reply.Text)
+	default:
+		return true, fmt.Errorf("%w: %q", ErrUnknownStop, reply.Stop)
 	}
-	return len(reply.ToolCalls) == 0, nil
 }
 
 // ask gets the next reply from the model, saves it and adds it to the conversation.
@@ -564,8 +615,11 @@ func (t *taskRun) ask(ctx context.Context) (Message, error) {
 	if err := t.r.Store.SetCurrent(ctx, t.task.ID, "asking "+t.task.Model); err != nil {
 		return Message{}, fmt.Errorf("save status: %w", err)
 	}
+	if err := t.clearOld(ctx); err != nil {
+		return Message{}, err
+	}
 	began := time.Now()
-	reply, err := t.r.Model.Ask(ctx, t.task.Model, t.msgs, t.tools)
+	reply, err := t.r.Model.Ask(ctx, t.task.Model, t.sent(), t.tools)
 	if err != nil {
 		return Message{}, fmt.Errorf("step %d: ask model: %w", t.steps, err)
 	}
@@ -575,9 +629,16 @@ func (t *taskRun) ask(ctx context.Context) (Message, error) {
 	}
 	spentBefore := t.usd
 	t.usd += reply.USD
-	t.log.Info(klog.MsgModelReply, "seq", t.seq, "kind", ModelReply, "model", t.task.Model,
+	attrs := []any{"seq", t.seq, "kind", ModelReply, "model", t.task.Model,
 		"stop", reply.Stop, "calls", len(reply.ToolCalls),
-		"in", reply.TokensIn, "out", reply.TokensOut, "usd", roundUSD(reply.USD), "dur", since(began))
+		"in", reply.TokensIn, "out", reply.TokensOut, "usd", roundUSD(reply.USD), "dur", since(began)}
+	if reply.PromptTokens > 0 {
+		attrs = append(attrs, "history_tokens", reply.PromptTokens)
+		if t.window > 0 {
+			attrs = append(attrs, "history_pct", math.Round(1000*float64(reply.PromptTokens)/float64(t.window))/10)
+		}
+	}
+	t.log.Info(klog.MsgModelReply, attrs...)
 	if near := 0.8 * t.task.MaxUSD; near > 0 && spentBefore < near && t.usd >= near {
 		t.log.Warn(klog.MsgBudgetNear, "usd", roundUSD(t.usd), "max_usd", t.task.MaxUSD)
 	}
@@ -590,9 +651,13 @@ func (t *taskRun) ask(ctx context.Context) (Message, error) {
 	if len(calls) > 0 {
 		what = strings.Join(calls, ", ")
 	}
-	t.progress("model  %s: %s%s", t.task.Model, what, t.costText(reply.USD))
-	t.msgs = append(t.msgs, reply)
+	t.progress("model  %s: %s%s%s", t.task.Model, what, t.costText(reply.USD), t.historyText(reply.PromptTokens))
 	t.steps++
+	if reply.Stop == StopContextFull {
+		// Not added: asked again on resume, after clearing or with a larger window.
+		return Message{}, fmt.Errorf("%w: %s: the reply reached the end of the window", ErrContextFull, t.task.Model)
+	}
+	t.addReply(reply)
 	return reply, nil
 }
 
@@ -622,6 +687,9 @@ func (t *taskRun) act(ctx context.Context, reply Message) error {
 		} else {
 			t.log.Info(klog.MsgToolResult, attrs...)
 			t.log.Debug(klog.MsgToolOut, "seq", t.seq, "text", out)
+			if n := t.task.MaxToolResultTokens; n > 0 && approxTokens(out) > n {
+				t.log.Info(klog.MsgToolResultCut, "tool", call.Name, "call_id", call.ID, "tokens", approxTokens(out), "max", n)
+			}
 			t.progress("tool   %s %s: ok", call.Name, cut(string(call.Args), 80))
 		}
 		t.msgs = append(t.msgs, res)
@@ -730,9 +798,12 @@ func (t *taskRun) replay(history []Step) {
 	for _, s := range history {
 		switch s.Kind {
 		case ModelReply:
-			t.msgs = append(t.msgs, s.Msg)
 			t.steps++
 			t.usd += s.Msg.USD
+			if s.Msg.Stop == StopContextFull {
+				continue // not in the conversation; see StopContextFull
+			}
+			t.addReply(s.Msg)
 			m := s.Msg
 			t.last = &m
 		case Intent:
@@ -748,6 +819,8 @@ func (t *taskRun) replay(history []Step) {
 			t.msgs = append(t.msgs, s.Msg)
 			t.done[s.CallID] = true
 			delete(t.pending, s.CallID)
+		case ResultsCleared:
+			t.clearedThrough = max(t.clearedThrough, t.resultIndex(s.CallID))
 		}
 	}
 }

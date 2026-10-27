@@ -49,6 +49,12 @@ const (
 	MsgBudgetNear   = "budget near limit" // WARN once, when the task's cost passes 80% of max_usd
 	MsgModelRetires = "model retires"     // WARN: the task's model retires within 30 days
 
+	// context window
+	MsgResultsCleared  = "tool results cleared" // old tool results left out of what's sent
+	MsgNothingToClear  = "nothing to clear"     // WARN once per run: over the threshold, no result can be cleared
+	MsgNoContextTokens = "no context tokens"    // WARN: the model's window is unknown; results aren't cleared
+	MsgToolResultCut   = "tool result cut"      // longer than max_tool_result_tokens; cut in what's sent
+
 	// MCP servers (mcphost); entries carry server=<name>
 	MsgMCPUp          = "mcp server up"
 	MsgMCPDown        = "mcp server down"    // a call failed: the server died
