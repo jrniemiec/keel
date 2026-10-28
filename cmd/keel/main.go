@@ -27,6 +27,7 @@ import (
 	"github.com/jrniemiec/keel/config"
 	"github.com/jrniemiec/keel/internal/klog"
 	"github.com/jrniemiec/keel/internal/tasklock"
+	"github.com/jrniemiec/keel/internal/version"
 	"github.com/jrniemiec/keel/mcphost"
 	"github.com/jrniemiec/keel/model"
 	"github.com/jrniemiec/keel/models"
@@ -34,7 +35,7 @@ import (
 	"github.com/jrniemiec/keel/store"
 )
 
-var version = "dev" // set by the Makefile
+var buildVersion = "dev" // set with -X by the Makefile and the release build
 
 // helpText is printed by keel -h, keel --help and each command's -h. It is
 // the only help, so keep it in step with the commands' flags.
@@ -46,6 +47,7 @@ Usage:
   keel steps [flags] <task-id>
   keel servers [flags]
   keel models [flags] [<pattern>...]
+  keel version
 
 Commands:
   run    Run a task, or resume it from its last saved step after a crash
@@ -98,6 +100,8 @@ Commands:
          keel models > $KEEL_HOME/config/models.jsonc.
          <pattern> keeps only matching models, e.g. 'anthropic:*'; a
          pattern matching no model is an error.
+  version
+         Print keel's version; keel --version too.
 
 Flags for run:
   -c, --config <file>      use this keel config (servers, db, log) instead of $KEEL_HOME/config/keel.jsonc (KEEL_HOME default ~/.keel)
@@ -151,7 +155,7 @@ API keys are read from the environment, never from a config file:
   Ollama models      no key
 `
 
-const usageLine = "usage: keel run [flags] <task> | keel tasks [flags] | keel steps [flags] <task-id> | keel servers [flags] | keel models [flags] [<pattern>...]\nrun 'keel -h' for help"
+const usageLine = "usage: keel run [flags] <task> | keel tasks [flags] | keel steps [flags] <task-id> | keel servers [flags] | keel models [flags] [<pattern>...] | keel version\nrun 'keel -h' for help"
 
 // usageError is a mistake on the command line: exit 2 with the usage line.
 type usageError struct{ msg string }
@@ -178,6 +182,9 @@ func dispatch(args []string) error {
 	switch args[0] {
 	case "-h", "-help", "--help":
 		fmt.Print(helpText)
+		return nil
+	case "version", "--version":
+		fmt.Println("keel", version.String(buildVersion))
 		return nil
 	case "run":
 		return run(args[1:])
@@ -310,7 +317,7 @@ func run(args []string) error {
 		return usageError{fmt.Sprintf("--log-level %q: want debug, info, warn or error", logLevel)}
 	}
 	klog.Init(kc.LogFile, level, f.verbose, kc.LogMaxMB, kc.LogBackups)
-	klog.Info(klog.MsgStarted, "version", version, "db", kc.DB, "task", task.ID, "model", task.Model)
+	klog.Info(klog.MsgStarted, "version", version.String(buildVersion), "db", kc.DB, "task", task.ID, "model", task.Model)
 	if retires, err := time.Parse(time.DateOnly, modelInfo.RetiresOn); err == nil && time.Until(retires) < 30*24*time.Hour {
 		klog.Warn(klog.MsgModelRetires, "model", task.Model, "retires_on", modelInfo.RetiresOn)
 		fmt.Fprintf(os.Stderr, "keel: warning: model %s retires on %s\n", task.Model, modelInfo.RetiresOn)

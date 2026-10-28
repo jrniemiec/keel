@@ -20,18 +20,23 @@ import (
 	"time"
 
 	"github.com/jrniemiec/keel/config"
+	"github.com/jrniemiec/keel/internal/version"
 	"github.com/jrniemiec/keel/store"
 )
+
+var buildVersion = "dev" // set with -X by the Makefile and the release build
 
 func main() {
 	dbPath := flag.String("db", defaultDBPath(), "SQLite database file")
 	watch := flag.Bool("w", false, "refresh every second until Ctrl-C")
+	showVersion := flag.Bool("version", false, "print kstat's version")
 	flag.Usage = func() {
 		fmt.Fprintf(flag.CommandLine.Output(), `kstat shows keel's tasks and their progress, latest first. It only
 reads the database; run it in its own window next to keel.
 
 Usage:
   kstat [-w] [-db file]
+  kstat -version
 
 Examples:
   kstat -w                            watch all tasks, refreshed every second
@@ -45,6 +50,10 @@ Flags:
 		flag.PrintDefaults()
 	}
 	flag.Parse()
+	if *showVersion {
+		fmt.Println("kstat", version.String(buildVersion))
+		return
+	}
 
 	db, err := store.OpenSQLite(*dbPath)
 	if err != nil {
